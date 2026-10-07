@@ -52,6 +52,10 @@ jobs:
           echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
           echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
 
+      # Тесты ядра (привязки, хуки, фичи) и проверка «Despada.dll грузится без ImGui.NET».
+      - name: Test
+        run: dotnet test Despada.Tests/Despada.Tests.csproj -c Release
+
       # publish, а не build: для библиотечного проекта только он кладёт рядом
       # зависимости из NuGet (ImGui.NET, 0Harmony) и папку runtimes/.
       - name: Publish

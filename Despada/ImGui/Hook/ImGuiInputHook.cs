@@ -6,13 +6,13 @@ using System.Collections.Concurrent;
 using System.Numerics;
 using System.Reflection;
 using Despada.Config;
+using Despada.Core;
 using Despada.ImGui.UserInterface;
 using HarmonyLib;
 using ImGuiNET;
 
 namespace Despada.ImGui.Hook;
 
-[HarmonyPatch]
 public static class ImGuiInputHook
 {
     private static readonly ConcurrentQueue<Action<ImGuiIOPtr>> _ioQueue = new();
@@ -58,75 +58,22 @@ public static class ImGuiInputHook
         WantCaptureKeyboard = io.WantTextInput;
     }
 
-    private static List<MethodBase>? _targets;
-
-    private static List<MethodBase> Targets => _targets ??=
-    [
-        ..ResolveInputManagerMethods(),
-        ..ResolveUiManagerMethods(),
-        ..ResolveGameControllerMethods(),
-    ];
-
-    // Harmony throws on an empty TargetMethods(); decline the patch instead.
-    static bool Prepare()
+    /// <summary>One prefix on every input entry point; a missing one only loses that kind of input.</summary>
+    public static void Install()
     {
-        if (Targets.Count > 0) return true;
-        MarseyLogger.Fatal("[ImGuiInputHook] No input targets found — input hook disabled.");
-        return false;
+        // Without its input hooks the overlay can be neither used nor closed: give everything back
+        // to the game for the rest of the session.
+        Hooks.Tripped += (owner, reason) =>
+        {
+            if (owner == "input") ImGuiRenderer.Disable($"input hooks shut off: {reason}");
+        };
+
+        foreach (var target in new[] { Engine.InputKeyDown, Engine.InputKeyUp, Engine.UiMouseMove,
+                                       Engine.UiMouseWheel, Engine.GameTextEntered })
+            Hooks.Prefix("input", target, nameof(Prefix), typeof(ImGuiInputHook));
     }
 
-    static IEnumerable<MethodBase> TargetMethods() => Targets;
-
-    private static IEnumerable<MethodBase> ResolveInputManagerMethods()
-    {
-        var t = AccessTools.TypeByName("Robust.Client.Input.InputManager");
-        if (t is null)
-        {
-            MarseyLogger.Fatal("[ImGuiInputHook] InputManager type not found.");
-            yield break;
-        }
-        foreach (var name in new[] { "KeyDown", "KeyUp" })
-        {
-            var m = AccessTools.Method(t, name);
-            if (m is null) { MarseyLogger.Warn($"[ImGuiInputHook] InputManager.{name} not found."); continue; }
-            MarseyLogger.Info($"[ImGuiInputHook] Patching {m.FullDescription()}");
-            yield return m;
-        }
-    }
-
-    private static IEnumerable<MethodBase> ResolveUiManagerMethods()
-    {
-        var t = AccessTools.TypeByName("Robust.Client.UserInterface.UserInterfaceManager");
-        if (t is null)
-        {
-            MarseyLogger.Fatal("[ImGuiInputHook] UserInterfaceManager type not found.");
-            yield break;
-        }
-        foreach (var name in new[] { "MouseMove", "MouseWheel" })
-        {
-            var m = AccessTools.Method(t, name);
-            if (m is null) { MarseyLogger.Warn($"[ImGuiInputHook] UserInterfaceManager.{name} not found."); continue; }
-            MarseyLogger.Info($"[ImGuiInputHook] Patching {m.FullDescription()}");
-            yield return m;
-        }
-    }
-
-    private static IEnumerable<MethodBase> ResolveGameControllerMethods()
-    {
-        var t = AccessTools.TypeByName("Robust.Client.GameController");
-        if (t is null)
-        {
-            MarseyLogger.Fatal("[ImGuiInputHook] GameController type not found.");
-            yield break;
-        }
-        var m = AccessTools.Method(t, "TextEntered");
-        if (m is null) { MarseyLogger.Warn("[ImGuiInputHook] GameController.TextEntered not found."); yield break; }
-        MarseyLogger.Info($"[ImGuiInputHook] Patching {m.FullDescription()}");
-        yield return m;
-    }
-
-    [HarmonyPrefix]
-    static bool Prefix(MethodBase __originalMethod, object[] __args)
+    private static bool Prefix(MethodBase __originalMethod, object[] __args)
     {
         try
         {
@@ -142,7 +89,8 @@ public static class ImGuiInputHook
         }
         catch (Exception ex)
         {
-            MarseyLogger.Warn($"[ImGuiInputHook] Exception in {__originalMethod.Name}: {ex.Message}");
+            // Repeated failures remove the input hooks (game input works as without Despada).
+            Hooks.Fail("input", __originalMethod.Name, ex);
             return true;
         }
     }
@@ -194,7 +142,7 @@ public static class ImGuiInputHook
 
     private static byte ResolveKey(string name)
     {
-        var keyType = AccessTools.TypeByName("Robust.Client.Input.Keyboard+Key");
+        var keyType = Engine.KeyboardKey.Type;
         if (keyType is not null && Enum.TryParse(keyType, name, out var value))
             return Convert.ToByte(value);
 
@@ -427,28 +375,13 @@ public static class ImGuiInputHook
     }
 }
 
-[HarmonyPatch]
 public static class ImGuiSdl3TextInputStopPatch
 {
     private static bool _loggedBlock;
 
-    private static MethodBase? _target;
+    public static void Install()
+        => Hooks.Prefix("input", Engine.Sdl3TextInputStop, nameof(Prefix), typeof(ImGuiSdl3TextInputStopPatch));
 
-    // Harmony throws on a null TargetMethod(); decline the patch instead (e.g. GLFW backend).
-    static bool Prepare()
-    {
-        var t = AccessTools.TypeByName("Robust.Client.Graphics.Clyde.Clyde+Sdl3WindowingImpl");
-        _target = t is null ? null
-            : AccessTools.Method(t, "TextInputStop") ?? AccessTools.Method(t, "StopTextInput");
-
-        MarseyLogger.Info($"[ImGuiSdl3TextInputStopPatch] Target: {_target?.FullDescription() ?? "NOT FOUND — skipped"}");
-        return _target is not null;
-    }
-
-    [HarmonyTargetMethod]
-    private static MethodBase TargetMethod() => _target!;
-
-    [HarmonyPrefix]
     private static bool Prefix()
     {
         if (ImGuiRenderer.OverlayVisible && ImGuiInputHook.WantCaptureKeyboard)

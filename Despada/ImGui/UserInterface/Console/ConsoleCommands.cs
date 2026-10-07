@@ -19,7 +19,7 @@ internal static class ConsoleCommands
     static ConsoleCommands()
     {
         Register(new ConsoleCommand("help", "help [command]", "list commands or show one", Help));
-        Register(new ConsoleCommand("clear", "clear", "clear this session", (s, _) => s.Lines.Clear()));
+        Register(new ConsoleCommand("clear", "clear", "clear this session", (s, _) => s.Clear()));
         Register(new ConsoleCommand("echo", "echo <text>", "print text", (s, a) => s.Print(LineKind.Output, string.Join(' ', a))));
         Register(new ConsoleCommand("theme", "theme [dark|light]", "show or switch the theme", Theme_));
         Register(new ConsoleCommand("glass", "glass [0.6..1]", "show or set window opacity", Glass));
@@ -94,7 +94,8 @@ internal static class ConsoleCommands
 
         var width = _commands.Values.Max(c => c.Usage.Length) + 3;
         foreach (var c in _commands.Values)
-            s.Print(LineKind.Output, c.Usage.PadRight(width) + c.Description);
+            s.Print(new Span(c.Name, Tone.Accent), new Span(c.Usage[c.Name.Length..].PadRight(width - c.Name.Length), Tone.Sub),
+                new Span(c.Description, Tone.Muted));
     }
 
     private static void Theme_(ConsoleSession s, string[] args)

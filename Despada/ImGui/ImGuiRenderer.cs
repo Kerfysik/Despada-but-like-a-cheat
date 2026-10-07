@@ -7,6 +7,7 @@ using System.Numerics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Despada.Config;
+using Despada.Core;
 using Despada.ImGui.Hook;
 using Despada.ImGui.UserInterface;
 using HarmonyLib;
@@ -47,6 +48,9 @@ public static class ImGuiRenderer
 
     public static void RenderFrame()
     {
+        // Ticks (and posted work) normally run on the Update hook; without it, once per frame here.
+        if (!Lifecycle.TickHooked) Lifecycle.RunTick();
+
         if (_initFailed) return;
 
         // Wall clock, ticked even while nothing is drawn so a pending save isn't held back.
@@ -169,9 +173,21 @@ public static class ImGuiRenderer
     }
 
     // Backend-level failure: disable the overlay for good and give the game its input back.
+    /// <summary>Turns the overlay off for the session (e.g. its input hooks were shut off).</summary>
+    public static void Disable(string reason)
+    {
+        MarseyLogger.Fatal($"[ImGuiRenderer] overlay disabled: {reason}");
+        Shutoff();
+    }
+
     private static void FailHard(string where, Exception ex)
     {
         MarseyLogger.Fatal($"[ImGuiRenderer] {where}: {ex}");
+        Shutoff();
+    }
+
+    private static void Shutoff()
+    {
         _initFailed = true;
 
         if (OverlayVisible)
@@ -200,7 +216,7 @@ public static class ImGuiRenderer
 
     private static bool GameHasKeyboardFocus()
     {
-        var ui = ResolveFromIoC("Robust.Client.UserInterface.IUserInterfaceManager");
+        var ui = Engine.Ui.Instance;
         return ui is not null && AccessTools.Property(ui.GetType(), "KeyboardFocused")?.GetValue(ui) is not null;
     }
 
@@ -208,7 +224,7 @@ public static class ImGuiRenderer
     {
         try
         {
-            var clyde     = ResolveFromIoC("Robust.Client.Graphics.IClyde");
+            var clyde     = Engine.ClydeManager.Instance;
             if (clyde is null) return;
 
             var clydeType = clyde.GetType();
@@ -683,28 +699,20 @@ public static class ImGuiRenderer
     {
         try
         {
-            var clydeType = AccessTools.TypeByName("Robust.Client.Graphics.Clyde.Clyde");
-            if (clydeType is null) return;
-
-            var clyde = ResolveFromIoC("Robust.Client.Graphics.IClyde");
-            if (clyde is null) return;
-
-            var setCursor = AccessTools.Method(clydeType, "SetCursor");
-            if (setCursor is null) return;
+            var clyde = Engine.ClydeManager.Instance;
+            if (clyde is null || !Engine.ClydeSetCursor.Ok) return;
 
             if (visible)
             {
-                setCursor.Invoke(clyde, [null]);
+                Engine.ClydeSetCursor.Invoke(clyde, [null]);
             }
             else
             {
-                var shapeType = AccessTools.TypeByName("Robust.Client.Graphics.StandardCursorShape");
-                if (shapeType is not null && Enum.IsDefined(shapeType, "Arrow"))
+                var shapeType = Engine.StdCursorShape.Type;
+                if (shapeType is not null && Engine.ClydeStdCursor.Ok && Enum.IsDefined(shapeType, "Arrow"))
                 {
-                    var shape  = Enum.Parse(shapeType, "Arrow");
-                    var getStd = AccessTools.Method(clydeType, "GetStandardCursor");
-                    var cursor = getStd?.Invoke(clyde, [shape]);
-                    setCursor.Invoke(clyde, [cursor]);
+                    var cursor = Engine.ClydeStdCursor.Invoke(clyde, Enum.Parse(shapeType, "Arrow"));
+                    Engine.ClydeSetCursor.Invoke(clyde, cursor);
                 }
             }
 
@@ -713,31 +721,6 @@ public static class ImGuiRenderer
         catch (Exception ex)
         {
             MarseyLogger.Warn($"[ImGuiRenderer] SetCursorVisible failed: {ex.Message}");
-        }
-    }
-
-    private static object? ResolveFromIoC(string interfaceName)
-    {
-        try
-        {
-            var iocType       = AccessTools.TypeByName("Robust.Shared.IoC.IoCManager");
-            if (iocType is null) return null;
-            var interfaceType = AccessTools.TypeByName(interfaceName);
-            if (interfaceType is null) return null;
-
-            var resolveGeneric = iocType.GetMethod("Resolve",
-                BindingFlags.Static | BindingFlags.Public, null, [], null);
-            if (resolveGeneric is not null)
-                return resolveGeneric.MakeGenericMethod(interfaceType).Invoke(null, []);
-
-            var resolveByType = iocType.GetMethod("Resolve",
-                BindingFlags.Static | BindingFlags.Public, null, [typeof(Type)], null);
-            return resolveByType?.Invoke(null, [interfaceType]);
-        }
-        catch (Exception ex)
-        {
-            MarseyLogger.Warn($"[ImGuiRenderer] ResolveFromIoC({interfaceName}) failed: {ex.Message}");
-            return null;
         }
     }
 }

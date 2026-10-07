@@ -31,6 +31,10 @@
     </ItemGroup>
 
     <ItemGroup>
+        <InternalsVisibleTo Include="Despada.Tests" />
+    </ItemGroup>
+
+    <ItemGroup>
         <!-- Compile against it, but don't copy it next to Despada.dll: it is embedded below. -->
         <PackageReference Include="ImGui.NET" Version="1.91.6.1" GeneratePathProperty="true" ExcludeAssets="runtime" />
         <PackageReference Include="Lib.Harmony" Version="2.4.2" />

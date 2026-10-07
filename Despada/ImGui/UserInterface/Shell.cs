@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 using System.Numerics;
+using Despada.Core;
 using ImGuiNET;
 
 namespace Despada.ImGui.UserInterface;
@@ -13,12 +14,11 @@ public static class Shell
 {
     private const float D = UiScale.DesignHeight / 1080f; // 1080p px → logical units
 
-    private enum Section { Console, Settings }
+    // Sections: Console, one per feature that has a tab (its id), Settings on the right.
+    private const string ConsoleId  = "#console";
+    private const string SettingsId = "#settings";
 
-    private static readonly (Section Id, string Label)[] LeftSections = [(Section.Console, "Console")];
-    private static readonly (Section Id, string Label)[] RightSections = [(Section.Settings, "Settings")];
-
-    private static Section _section = Section.Console;
+    private static string _section = ConsoleId;
 
     // Header drag: started by the header button last frame and applied before Begin, so the window's
     // clip/work rects, the blurred backdrop and the content all use the new position.
@@ -28,7 +28,7 @@ public static class Shell
     /// <summary>Called when the overlay becomes visible.</summary>
     public static void OnOpened()
     {
-        if (_section == Section.Console)
+        if (_section == ConsoleId)
             ConsolePanel.RequestFocus();
     }
 
@@ -76,18 +76,28 @@ public static class Shell
         {
             DrawHeader();
 
-            if (_section == Section.Console)
+            if (_section == ConsoleId)
             {
                 BeginRow(36f * D);
                 ConsolePanel.DrawSessionTabs();
                 EndRow();
                 ConsolePanel.Draw();
             }
-            else
+            else if (_section == SettingsId)
             {
                 ImGuiNET.ImGui.Dummy(new Vector2(0f, 8f * D));
                 SettingsPanel.Draw();
             }
+            else if (Features.Find(_section) is { Tab: not null } feature)
+            {
+                // A feature's tab: its on/off switch (and why it can't be on) lead the second row.
+                BeginRow(36f * D);
+                Features.DrawTabRow(feature);
+                EndRow();
+                Features.DrawTabBody(feature);
+            }
+            else
+                _section = ConsoleId;
         }
 
         ImGuiNET.ImGui.End();
@@ -102,9 +112,14 @@ public static class Shell
         var min = ImGuiNET.ImGui.GetWindowPos();
         var max = min + ImGuiNET.ImGui.GetWindowSize();
 
+        // Still requested while the blur retries after a failed frame (Texture is 0 then): tint only.
         GlassBlur.Request(min, max);
-        GlassBlur.GetUv(min, max, out var uv0, out var uv1);
-        dl.AddImageRounded(GlassBlur.Texture, min, max, uv0, uv1, 0xFFFFFFFF, Theme.WindowRounding);
+        var tex = GlassBlur.Texture;
+        if (tex != 0)
+        {
+            GlassBlur.GetUv(min, max, out var uv0, out var uv1);
+            dl.AddImageRounded(tex, min, max, uv0, uv1, 0xFFFFFFFF, Theme.WindowRounding);
+        }
 
         var tint = 0.45f + (Theme.GlassAlpha - 0.6f) / 0.4f * 0.5f;
         dl.AddRectFilled(min, max, Theme.ToU32(new Vector4(Theme.P.Glass, tint)), Theme.WindowRounding);
@@ -128,17 +143,11 @@ public static class Shell
         var logo = 18f * D;
         x += Logo.DrawWithWordmark(dl, new Vector2(x, winPos.Y + (h - logo) * 0.5f), logo, 10f * D) + 28f * D;
 
-        foreach (var (id, label) in LeftSections)
-            x += SectionTab(id, label, x, h) + 22f * D;
+        x += SectionTab(ConsoleId, "Console", x, h) + 22f * D;
+        foreach (var f in Features.WithTabs)
+            x += SectionTab(f.Id, f.Tab!, x, h) + 22f * D;
 
-        var rx = winPos.X + width - padX;
-        for (var i = RightSections.Length - 1; i >= 0; i--)
-        {
-            var (id, label) = RightSections[i];
-            rx -= ImGuiNET.ImGui.CalcTextSize(label).X;
-            SectionTab(id, label, rx, h);
-            rx -= 22f * D;
-        }
+        SectionTab(SettingsId, "Settings", winPos.X + width - padX - ImGuiNET.ImGui.CalcTextSize("Settings").X, h);
 
         dl.AddLine(new Vector2(winPos.X, winPos.Y + h), new Vector2(winPos.X + width, winPos.Y + h),
             Theme.ToU32(Theme.P.Sep));
@@ -147,18 +156,18 @@ public static class Shell
     }
 
     /// <summary>A text tab in the header; returns its width.</summary>
-    private static float SectionTab(Section id, string label, float x, float headerH)
+    private static float SectionTab(string id, string label, float x, float headerH)
     {
         var winPos = ImGuiNET.ImGui.GetWindowPos();
         var size   = ImGuiNET.ImGui.CalcTextSize(label);
         var active = _section == id;
 
         ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x, winPos.Y));
-        if (ImGuiNET.ImGui.InvisibleButton(label, new Vector2(size.X, headerH)) && !active)
+        if (ImGuiNET.ImGui.InvisibleButton(id, new Vector2(size.X, headerH)) && !active)
         {
             _section = id;
             SettingsPanel.CancelCapture();
-            if (id == Section.Console) ConsolePanel.RequestFocus();
+            if (id == ConsoleId) ConsolePanel.RequestFocus();
         }
 
         var hovered = ImGuiNET.ImGui.IsItemHovered();

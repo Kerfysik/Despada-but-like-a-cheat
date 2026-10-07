@@ -103,7 +103,7 @@ public static partial class Widgets
     }
 
     /// <summary>Muted text that is never treated as a printf format.</summary>
-    private static void MutedText(string text)
+    public static void MutedText(string text)
     {
         ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Theme.P.Muted);
         ImGuiNET.ImGui.TextUnformatted(text);

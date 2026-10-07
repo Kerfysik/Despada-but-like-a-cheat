@@ -15,7 +15,9 @@ namespace Despada.ImGui;
 ///
 /// Frame order: UI build calls <see cref="Request"/> + <see cref="GetUv"/>, then RenderFrame calls
 /// <see cref="Run"/> (inside GlStateGuard, before RenderDrawData), so the image is from this frame.
-/// Any failure disables the effect for the session; the UI then falls back to the plain WindowBg.
+/// A GL error or incomplete FBO right after a (re)allocation is retried a few times (a resize or
+/// fullscreen toggle can trip it once); a frame that couldn't be blurred shows only the tint. A
+/// persistent failure disables the effect for the session; the UI then falls back to the plain WindowBg.
 ///
 /// Only ints/uints/floats/nint/System.Numerics types are stored here (MarseyLoader GetTypes()).
 /// </summary>
@@ -41,6 +43,9 @@ internal static class GlassBlur
     private delegate void D_Uniform4f(int location, float v0, float v1, float v2, float v3);
     private delegate void D_DeleteProgram(uint program);
     private delegate void D_DeleteVertexArrays(int n, ref uint arrays);
+    private delegate void D_GetFloatv(uint pname, float[] data);
+    private delegate void D_ClearColor(float r, float g, float b, float a);
+    private delegate void D_Clear(uint mask);
 
     private static D_GenFramebuffers         glGenFramebuffers         = null!;
     private static D_DeleteFramebuffers      glDeleteFramebuffers      = null!;
@@ -63,6 +68,9 @@ internal static class GlassBlur
     private static D_Uniform4f               glUniform4f               = null!;
     private static D_DeleteProgram           glDeleteProgram           = null!;
     private static D_DeleteVertexArrays      glDeleteVertexArrays      = null!;
+    private static D_GetFloatv               glGetFloatv               = null!;
+    private static D_ClearColor              glClearColor              = null!;
+    private static D_Clear                   glClear                   = null!;
 
     private const uint GL_TEXTURE_2D                 = 0x0DE1;
     private const uint GL_TEXTURE0                   = 0x84C0;
@@ -95,6 +103,7 @@ internal static class GlassBlur
     private const uint GL_PIXEL_UNPACK_BUFFER        = 0x88EC;
     private const uint GL_PIXEL_UNPACK_BUFFER_BINDING = 0x88EF;
     private const uint GL_VIEWPORT                   = 0x0BA2;
+    private const uint GL_COLOR_CLEAR_VALUE          = 0x0C22;
     private const uint GL_BLEND                      = 0x0BE2;
     private const uint GL_SCISSOR_TEST               = 0x0C11;
     private const uint GL_DEPTH_TEST                 = 0x0B71;
@@ -113,6 +122,7 @@ internal static class GlassBlur
     private static readonly uint[] _tex = new uint[MaxLevels + 1];
     private static readonly uint[] _fbo = new uint[MaxLevels + 1];
     private static readonly int[]  _vp  = new int[4];
+    private static readonly float[] _clearColor = new float[4];
 
     private static uint _progDown, _progUp, _vao;
     // Uniform locations: tex, rect, texel, clamp, offset.
@@ -125,11 +135,16 @@ internal static class GlassBlur
     private static int _encoding;           // GL_SRGB / GL_LINEAR / 0 = unknown
     private static int _sampleBuffers, _samples;
     private static int _checkFrames;        // glGetError checks left after (re)allocation
+    private static int _strikes;            // failed checks since the last clean allocation
+
+    // Consecutive failed checks before the effect is disabled for good.
+    private const int MaxStrikes = 4;
 
     private static bool _loaded;
     private static bool _ready;
     private static bool _failed;
     private static bool _releasePending;
+    private static bool _broken;            // last attempt failed, retrying: don't draw the texture
 
     private static bool    _requested;
     private static Vector2 _reqMin, _reqMax;
@@ -137,8 +152,11 @@ internal static class GlassBlur
     /// <summary>Blur is initialised, hasn't failed and is enabled in the settings.</summary>
     public static bool Available => _ready && !_failed && DespadaConfig.Current.GlassBlur > 0f;
 
-    /// <summary>GL name of the blurred (level 1) texture, as an ImTextureID.</summary>
-    public static nint Texture => _ready && !_failed ? (nint)_tex[1] : 0;
+    /// <summary>
+    /// GL name of the blurred (level 1) texture, as an ImTextureID; 0 while a failed frame is being
+    /// retried (draw only the tint then).
+    /// </summary>
+    public static nint Texture => _ready && !_failed && !_broken ? (nint)_tex[1] : 0;
 
     /// <summary>Called while building the UI: blur the area under this rect (ImGui logical units) this frame.</summary>
     public static void Request(Vector2 minLogical, Vector2 maxLogical)
@@ -205,12 +223,13 @@ internal static class GlassBlur
             glGetIntegervArr(GL_VIEWPORT, _vp);
             var blend = glIsEnabled(GL_BLEND);
 
+            bool produced = false;
             try
             {
                 if (init)
                     Init(drawFbo, screenW, screenH);
                 else
-                    Process(drawFbo, screenW, screenH);
+                    produced = Process(drawFbo, screenW, screenH);
             }
             catch (Exception ex)
             {
@@ -219,6 +238,9 @@ internal static class GlassBlur
             }
             finally
             {
+                // The UI already references the texture: never let it show a stale or undefined image.
+                if (!init && !produced) Invalidate();
+
                 // RenderDrawData draws into whatever is bound and doesn't set the viewport itself.
                 glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (uint)drawFbo);
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, (uint)readFbo);
@@ -286,6 +308,9 @@ internal static class GlassBlur
         glUniform4f              = L<D_Uniform4f>("glUniform4f", ref missing);
         glDeleteProgram          = L<D_DeleteProgram>("glDeleteProgram", ref missing);
         glDeleteVertexArrays     = L<D_DeleteVertexArrays>("glDeleteVertexArrays", ref missing);
+        glGetFloatv              = L<D_GetFloatv>("glGetFloatv", ref missing);
+        glClearColor             = L<D_ClearColor>("glClearColor", ref missing);
+        glClear                  = L<D_Clear>("glClear", ref missing);
         // Only used for the encoding log/decision; optional.
         glGetFramebufferAttachmentParameteriv =
             GlLoader.TryLoad<D_GetFramebufferAttachmentParameteriv>("glGetFramebufferAttachmentParameteriv");
@@ -330,7 +355,9 @@ internal static class GlassBlur
         Allocate(screenW, screenH);
         CheckErrors("init");
 
-        _ready = true;
+        _ready   = true;
+        _broken  = false;
+        _strikes = 0;
         MarseyLogger.Info($"[GlassBlur] ready: {screenW}x{screenH} (tex {_texW}x{_texH}), " +
                           $"format {(_internalFormat == GL_SRGB8_ALPHA8 ? "SRGB8_ALPHA8" : "RGBA8")}, " +
                           $"window encoding {EncodingName(_encoding)}, samples {_sampleBuffers}/{_samples}, " +
@@ -413,10 +440,9 @@ internal static class GlassBlur
 
     // --- per frame ---------------------------------------------------------------------------
 
-    private static void Process(int drawFbo, int screenW, int screenH)
+    // True if this frame's image was produced; false leaves the texture to Invalidate.
+    private static bool Process(int drawFbo, int screenW, int screenH)
     {
-        if (_checkFrames > 0) DrainErrors();
-
         // Sample buffers can change if Clyde recreates the window target.
         glGetIntegerv(GL_SAMPLE_BUFFERS, out var sampleBuffers);
         var msaa = sampleBuffers > 0;
@@ -426,8 +452,27 @@ internal static class GlassBlur
             glGetIntegerv(GL_SAMPLES, out _samples);
             _scrW = 0; // force reallocation (level 0 needed / not needed)
         }
-        if (screenW != _scrW || screenH != _scrH)
-            Allocate(screenW, screenH);
+        var realloc = screenW != _scrW || screenH != _scrH;
+
+        // GL errors are sticky and Clyde doesn't read them (display.ogl_check_errors is off): drop
+        // whatever it left behind (e.g. while resizing its targets) so the checks below only see ours.
+        if (realloc || _checkFrames > 0) DrainErrors();
+
+        // The window target can be briefly unusable while the window is resized or (un)fullscreened.
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, (uint)drawFbo);
+        if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return false;
+
+        if (realloc)
+        {
+            try
+            {
+                Allocate(screenW, screenH);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Strike(ex.Message, screenW, screenH);
+            }
+        }
 
         // Radius in framebuffer pixels, scaled with resolution.
         var s      = Math.Clamp(DespadaConfig.Current.GlassBlur, 0f, 1f);
@@ -448,12 +493,12 @@ internal static class GlassBlur
         var y0 = Math.Clamp(bottom & ~(Snap - 1), 0, _texH);
         var x1 = Math.Clamp((right + Snap - 1) & ~(Snap - 1), 0, _texW);
         var y1 = Math.Clamp((top + Snap - 1) & ~(Snap - 1), 0, _texH);
-        if (x1 <= x0 || y1 <= y0) return;
+        if (x1 <= x0 || y1 <= y0) return false;
 
         // Part of the region that actually lies on screen (even, for the 2:1 capture).
         var vx1 = Math.Min(x1, screenW) & ~1;
         var vy1 = Math.Min(y1, screenH) & ~1;
-        if (vx1 <= x0 || vy1 <= y0) return;
+        if (vx1 <= x0 || vy1 <= y0) return false;
 
         glDisable(GL_SCISSOR_TEST);
         glDisable(GL_BLEND);
@@ -497,8 +542,46 @@ internal static class GlassBlur
         if (_checkFrames > 0)
         {
             _checkFrames--;
-            CheckErrors(msaa ? "blur (msaa resolve)" : "blur");
+            var err = glGetError();
+            if (err != 0)
+            {
+                DrainErrors();
+                return Strike($"GL error 0x{err:X4} during {(msaa ? "blur (msaa resolve)" : "blur")}", screenW, screenH);
+            }
+            if (_checkFrames == 0) _strikes = 0;
         }
+
+        _broken = false;
+        return true;
+    }
+
+    // A check after (re)allocation failed. Reallocate and try again next frame (drawing just the
+    // tint meanwhile); only a failure that keeps coming back disables the effect.
+    private static bool Strike(string reason, int screenW, int screenH)
+    {
+        if (++_strikes >= MaxStrikes)
+            throw new InvalidOperationException($"{reason} at {screenW}x{screenH}, {_strikes} attempts");
+
+        MarseyLogger.Info($"[GlassBlur] {reason} at {screenW}x{screenH}, retrying ({_strikes}/{MaxStrikes})");
+        _scrW   = 0;
+        _broken = true;
+        return false;
+    }
+
+    // Clears the level 1 texture to transparent, so a frame that wasn't blurred shows just the tint.
+    private static void Invalidate()
+    {
+        if (_fbo[1] == 0 || _texW == 0) return;
+        try
+        {
+            glGetFloatv(GL_COLOR_CLEAR_VALUE, _clearColor);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, _fbo[1]);
+            glDisable(GL_SCISSOR_TEST);
+            glClearColor(0f, 0f, 0f, 0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glClearColor(_clearColor[0], _clearColor[1], _clearColor[2], _clearColor[3]);
+        }
+        catch { /* best effort; never throw out of Run */ }
     }
 
     private static void Pass(int[] loc, int src, int dst, int x0, int y0, int x1, int y1,
@@ -578,6 +661,8 @@ internal static class GlassBlur
         if (_vao      != 0) { var v = _vao; glDeleteVertexArrays(1, ref v); _vao = 0; }
 
         _texW = _texH = _scrW = _scrH = 0;
+        _checkFrames = _strikes = 0;
+        _broken = false;
     }
 
     // --- shaders -----------------------------------------------------------------------------

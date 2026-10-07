@@ -16,6 +16,7 @@ internal static unsafe class WindowGuard
     private static delegate* unmanaged<nint, void> _storeState;
     private static delegate* unmanaged<nint, void> _recoverState;
     private static nint _state;
+    private static nint _innerState; // for TryDraw inside a guarded window (states can't nest)
 
     private static readonly Dictionary<string, Exception> _faulted = new();
 
@@ -32,6 +33,7 @@ internal static unsafe class WindowGuard
         }
 
         _state        = ((delegate* unmanaged<nint>)ctor)();
+        _innerState   = ((delegate* unmanaged<nint>)ctor)();
         _storeState   = (delegate* unmanaged<nint, void>)store;
         _recoverState = (delegate* unmanaged<nint, void>)recover;
     }
@@ -54,6 +56,27 @@ internal static unsafe class WindowGuard
             if (_state != 0) _recoverState(_state);
             _faulted[id] = ex;
             MarseyLogger.Fatal($"[WindowGuard] '{id}' failed and was disabled: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// Runs part of a window (e.g. a feature's tab) so that an exception unwinds only that part:
+    /// ImGui's stacks are restored to how they were before <paramref name="draw"/>. One level deep.
+    /// </summary>
+    public static bool TryDraw(Action draw, out Exception? error)
+    {
+        if (_innerState != 0) _storeState(_innerState);
+        try
+        {
+            draw();
+            error = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (_innerState != 0) _recoverState(_innerState);
+            error = ex;
+            return false;
         }
     }
 

@@ -4,11 +4,25 @@
 
 using System.Reflection;
 using Despada.Config;
-using HarmonyLib;
+using Despada.Core;
+using Despada.ImGui.Hook;
 
 public static class MarseyEntry
 {
     public static void Entry()
+    {
+        try
+        {
+            Start();
+        }
+        catch (Exception ex)
+        {
+            // Nothing may escape into the engine's module loading.
+            MarseyLogger.Fatal($"Despada failed to start: {ex}");
+        }
+    }
+
+    private static void Start()
     {
         MarseyLogger.Info("Entry for patching started.");
 
@@ -21,30 +35,20 @@ public static class MarseyEntry
         }
 
         DespadaConfig.Load();
-        PatchAll(Assembly.GetExecutingAssembly());
+
+        // Find everything first, then hook; each step only disables what depends on a missing piece.
+        Engine.ResolveAll();
+        Lifecycle.Install();
+        ClydeRenderHook.Install();
+        ImGuiInputHook.Install();
+        ImGuiSdl3TextInputStopPatch.Install();
+        Features.Initialize();
 
         Sedition.Hide();
         Sedition.Apply(new Sedition.Manifest
         {
             StackNames = { "Despada" },
         });
-    }
-
-    // Same as Harmony.PatchAll, but one failing patch class no longer aborts the rest
-    // (and no exception escapes into the engine's module loading).
-    private static void PatchAll(Assembly asm)
-    {
-        foreach (var type in AccessTools.GetTypesFromAssembly(asm))
-        {
-            try
-            {
-                SubverterPatch.Harm.CreateClassProcessor(type).Patch();
-            }
-            catch (Exception ex)
-            {
-                MarseyLogger.Fatal($"Patching {type.FullName} failed, feature disabled: {ex}");
-            }
-        }
     }
 
     private static Assembly? FindAssembly(string assemblyName)

@@ -344,7 +344,7 @@ internal static unsafe class ConsolePanel
         }
 
         if (ctrl && !shift && !alt && Key(ImGuiKey.L))
-            Active.Lines.Clear();
+            Active.Clear();
     }
 
     private static void StartRename(int i)
@@ -453,13 +453,21 @@ internal static unsafe class ConsolePanel
 
     private static void DrawLines(ConsoleSession s)
     {
+        var visible = s.Visible;
         var clipper = new ImGuiListClipperPtr(ImGuiNative.ImGuiListClipper_ImGuiListClipper());
-        clipper.Begin(s.Lines.Count);
+        clipper.Begin(visible.Count);
         while (clipper.Step())
         {
             for (var i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
             {
-                var line = s.Lines[i];
+                var index = visible[i];
+                var line  = s.Lines[index];
+                if (line.Spans is not null)
+                {
+                    DrawRichLine(s, index, line);
+                    continue;
+                }
+
                 if (line.Kind == LineKind.Command)
                 {
                     ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Theme.P.Accent);
@@ -487,6 +495,83 @@ internal static unsafe class ConsolePanel
         }
         clipper.End();
         clipper.Destroy();
+    }
+
+    private static Vector4 ToneColor(Tone tone) => tone switch
+    {
+        Tone.Sub     => Theme.P.Sub,
+        Tone.Muted   => Theme.P.Muted,
+        Tone.Accent  => Theme.P.Accent,
+        Tone.Accent2 => Theme.P.Accent2,
+        Tone.Link    => Theme.P.Link,
+        Tone.Green   => Theme.P.Green,
+        Tone.Yellow  => Theme.P.Yellow,
+        Tone.Red     => Theme.P.Red,
+        _            => Theme.P.Fg,
+    };
+
+    /// <summary>
+    /// A row of coloured runs; tree rows get guide lines (├ └ │ drawn as hairlines) and, if they
+    /// have children, a ▾/▸ toggle (the whole row is clickable).
+    /// </summary>
+    private static void DrawRichLine(ConsoleSession s, int index, ConsoleLine line)
+    {
+        var dl    = ImGuiNET.ImGui.GetWindowDrawList();
+        var pos   = ImGuiNET.ImGui.GetCursorScreenPos();
+        var lineH = ImGuiNET.ImGui.GetTextLineHeight();
+        var rowH  = ImGuiNET.ImGui.GetTextLineHeightWithSpacing();
+        var cw    = ImGuiNET.ImGui.CalcTextSize("M").X;
+        var step  = cw * 2f;
+        var x0    = pos.X + PromptIndent();
+
+        if (line.Depth > 0)
+        {
+            var col   = Theme.ToU32(Theme.P.Sep);
+            var thick = 1f / UiScale.K;
+            float Gx(int level) => MathF.Round(x0 + level * step + cw * 0.5f);
+
+            for (var l = 0; l < Math.Min(line.Depth - 1, 32); l++)
+                if ((line.Guides & (1u << l)) != 0)
+                    dl.AddLine(new Vector2(Gx(l), pos.Y), new Vector2(Gx(l), pos.Y + rowH), col, thick);
+
+            var gx  = Gx(line.Depth - 1);
+            var mid = MathF.Round(pos.Y + lineH * 0.5f);
+            dl.AddLine(new Vector2(gx, pos.Y), new Vector2(gx, line.Last ? mid : pos.Y + rowH), col, thick);
+            dl.AddLine(new Vector2(gx, mid), new Vector2(gx + step - cw * 0.7f, mid), col, thick);
+        }
+
+        var x        = x0 + line.Depth * step;
+        var isNode   = line.Descendants > 0;
+        var textX    = isNode ? x + step : x;
+        var textW    = 0f;
+        foreach (var span in line.Spans!)
+            textW += ImGuiNET.ImGui.CalcTextSize(span.Text).X;
+
+        var hovered = false;
+        if (isNode)
+        {
+            ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x, pos.Y));
+            ImGuiNET.ImGui.PushID(line.Id);
+            if (ImGuiNET.ImGui.InvisibleButton("##node", new Vector2(textX - x + textW, lineH)))
+                s.Toggle(index);
+            hovered = ImGuiNET.ImGui.IsItemHovered();
+            ImGuiNET.ImGui.PopID();
+
+            dl.AddText(new Vector2(x, pos.Y), Theme.ToU32(hovered ? Theme.P.Fg : Theme.P.Muted),
+                line.Collapsed ? "▸" : "▾");
+        }
+
+        foreach (var span in line.Spans!)
+        {
+            var c = ToneColor(span.Tone);
+            if (hovered && span.Tone == Tone.Fg) c = Theme.P.Accent;
+            dl.AddText(new Vector2(textX, pos.Y), Theme.ToU32(c), span.Text);
+            textX += ImGuiNET.ImGui.CalcTextSize(span.Text).X;
+        }
+
+        // Reserve the row as one item so the clipper keeps a fixed row height.
+        ImGuiNET.ImGui.SetCursorScreenPos(pos);
+        ImGuiNET.ImGui.Dummy(new Vector2(MathF.Max(1f, textX - pos.X), lineH));
     }
 
     private static float PromptIndent()

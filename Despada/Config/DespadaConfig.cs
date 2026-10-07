@@ -18,13 +18,31 @@ public sealed class DespadaSettings
     public float  GlassBlur     { get; set; } = 0.5f;       // 0 (off) .. 1
     public string ToggleKey     { get; set; } = DefaultToggleKey; // Robust Keyboard.Key name
 
+    /// <summary>Per feature (by id): on/off and its own settings.</summary>
+    public Dictionary<string, FeatureSettings> Features { get; set; } = new();
+
     public void Normalize()
     {
+        Features ??= new();
+        foreach (var key in Features.Keys.ToList())
+        {
+            var f = Features[key] ?? new FeatureSettings();
+            f.Values ??= new();
+            Features[key] = f;
+        }
         if (Theme is not ("dark" or "light")) Theme = "dark";
         GlassOpacity = float.IsFinite(GlassOpacity) ? Math.Clamp(GlassOpacity, 0.6f, 1f) : 0.92f;
         GlassBlur    = float.IsFinite(GlassBlur) ? Math.Clamp(GlassBlur, 0f, 1f) : 0.5f;
         if (string.IsNullOrWhiteSpace(ToggleKey)) ToggleKey = DefaultToggleKey;
     }
+}
+
+public sealed class FeatureSettings
+{
+    /// <summary>Null = the feature's default.</summary>
+    public bool? Enabled { get; set; }
+
+    public Dictionary<string, JsonElement> Values { get; set; } = new();
 }
 
 // JSON config in the per-user config dir. Loaded once, saved with a short debounce from the

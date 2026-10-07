@@ -4,6 +4,7 @@
 
 using System.Numerics;
 using Despada.Config;
+using Despada.Core;
 using Despada.ImGui.Hook;
 using ImGuiNET;
 
@@ -61,16 +62,28 @@ internal static class SettingsPanel
         Widgets.EndSection();
 
         Widgets.BeginSection("About");
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Theme.P.Muted);
-        ImGuiNET.ImGui.TextUnformatted("config");
-        ImGuiNET.ImGui.PopStyleColor();
-        ImGuiNET.ImGui.SameLine();
-        ImGuiNET.ImGui.TextUnformatted(DespadaConfig.FilePath);
+        AboutRow("config", DespadaConfig.FilePath);
+        AboutLabel("core");
+        Features.DrawEngineSummary();
         Widgets.EndSection();
 
         ImGuiNET.ImGui.EndGroup();
         ImGuiNET.ImGui.PopItemWidth();
         ImGuiNET.ImGui.EndChild();
+    }
+
+    private static void AboutRow(string label, string value)
+    {
+        AboutLabel(label);
+        ImGuiNET.ImGui.TextUnformatted(value);
+    }
+
+    private static void AboutLabel(string label)
+    {
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Theme.P.Muted);
+        ImGuiNET.ImGui.TextUnformatted(label);
+        ImGuiNET.ImGui.PopStyleColor();
+        ImGuiNET.ImGui.SameLine();
     }
 
     /// <summary>Label + key button; clicking it waits for the next key press (Esc cancels).</summary>
