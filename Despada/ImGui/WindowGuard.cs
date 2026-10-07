@@ -62,7 +62,7 @@ internal static unsafe class WindowGuard
         ImGuiNET.ImGui.SetNextWindowSize(new Vector2(420f, 0f), ImGuiCond.Appearing);
         if (ImGuiNET.ImGui.Begin($"{id} — error##fault_{id}", ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.AlwaysAutoResize))
         {
-            ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Theme.Hex(0xFF6B6B));
+            ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Theme.P.Red);
             ImGuiNET.ImGui.TextUnformatted($"{error.GetType().Name}");
             ImGuiNET.ImGui.PopStyleColor();
 

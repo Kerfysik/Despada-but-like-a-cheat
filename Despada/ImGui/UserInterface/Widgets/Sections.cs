@@ -11,18 +11,18 @@ public static partial class Widgets
 {
     public static void BeginSection(string title)
     {
-        _sectionId++;
         var availW = ImGuiNET.ImGui.GetContentRegionAvail().X;
 
+        ImGuiNET.ImGui.PushID(title);
         PushSectionStyle();
 
-        ImGuiNET.ImGui.BeginChild(SectionChildId("##section"), new Vector2(availW, 0f),
-            ImGuiChildFlags.AutoResizeY | ImGuiChildFlags.AlwaysAutoResize,
+        ImGuiNET.ImGui.BeginChild("##section", new Vector2(availW, 0f),
+            ImGuiChildFlags.AutoResizeY | ImGuiChildFlags.AlwaysUseWindowPadding,
             ImGuiWindowFlags.NoScrollbar);
 
-        DrawSectionBorder();
-
-        ImGuiNET.ImGui.TextColored(Theme.TextSecondary, title);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Theme.P.Muted);
+        ImGuiNET.ImGui.TextUnformatted(title);
+        ImGuiNET.ImGui.PopStyleColor();
         ImGuiNET.ImGui.Spacing();
     }
 
@@ -30,21 +30,24 @@ public static partial class Widgets
     {
         ImGuiNET.ImGui.EndChild();
         PopSectionStyle();
+        ImGuiNET.ImGui.PopID();
         ImGuiNET.ImGui.Dummy(new Vector2(0f, SectionGap));
     }
 
+    /// <summary>
+    /// Section with a title, description and an on/off toggle in the header.
+    /// Always pair with <see cref="EndFeatureSection"/>, whatever this returns.
+    /// </summary>
     public static bool BeginFeatureSection(string icon, string title, string description, ref bool enabled)
     {
-        _sectionId++;
         var availW = ImGuiNET.ImGui.GetContentRegionAvail().X;
 
+        ImGuiNET.ImGui.PushID(title);
         PushSectionStyle();
 
-        ImGuiNET.ImGui.BeginChild(SectionChildId("##feature"), new Vector2(availW, 0f),
-            ImGuiChildFlags.AutoResizeY | ImGuiChildFlags.AlwaysAutoResize,
+        ImGuiNET.ImGui.BeginChild("##feature", new Vector2(availW, 0f),
+            ImGuiChildFlags.AutoResizeY | ImGuiChildFlags.AlwaysUseWindowPadding,
             ImGuiWindowFlags.NoScrollbar);
-
-        DrawSectionBorder();
 
         var dl       = ImGuiNET.ImGui.GetWindowDrawList();
         var font     = ImGuiNET.ImGui.GetFont();
@@ -65,20 +68,14 @@ public static partial class Widgets
 
         var animT = Animate(toggleId, enabled);
 
-        var iconFs = font.FontSize * 2.0f;
+        var iconFs = ImGuiNET.ImGui.GetFontSize() * 2.0f;
         var iconSz = font.CalcTextSizeA(iconFs, float.MaxValue, 0f, icon);
-        var iconCol = new Vector4(
-            Theme.TextSecondary.X + (Theme.Cyan.X - Theme.TextSecondary.X) * animT,
-            Theme.TextSecondary.Y + (Theme.Cyan.Y - Theme.TextSecondary.Y) * animT,
-            Theme.TextSecondary.Z + (Theme.Cyan.Z - Theme.TextSecondary.Z) * animT,
-            1f);
-
         dl.AddText(font, iconFs,
             new Vector2(hL, origin.Y + (HeaderH - iconSz.Y) * 0.5f),
-            Theme.ToU32(iconCol), icon);
+            Theme.ToU32(Theme.Mix(Theme.P.Muted, Theme.P.Accent, animT)), icon);
 
         var textX   = hL + iconSz.X + 14f;
-        var titleFs = font.FontSize * 1.1f;
+        var titleFs = ImGuiNET.ImGui.GetFontSize() * 1.1f;
         var titleSz = font.CalcTextSizeA(titleFs, float.MaxValue, 0f, title);
         var descSz  = ImGuiNET.ImGui.CalcTextSize(description);
         var blockH  = titleSz.Y + descSz.Y + 3f;
@@ -86,17 +83,17 @@ public static partial class Widgets
 
         if (enabled)
         {
-            DrawGradientText(dl, font, titleFs, new Vector2(textX, blockY),
-                title, Theme.Violet, Theme.Cyan, Theme.Magenta);
+            DrawGradientText(dl, font, titleFs, new Vector2(textX, blockY), title,
+                Theme.P.Accent, Theme.Mix(Theme.P.Accent, Theme.P.Accent2, 0.5f), Theme.P.Accent2);
         }
         else
         {
             dl.AddText(font, titleFs, new Vector2(textX, blockY),
-                Theme.ToU32(Theme.TextSecondary), title);
+                Theme.ToU32(Theme.P.Muted), title);
         }
 
         dl.AddText(new Vector2(textX, blockY + titleSz.Y + 3f),
-            Theme.ToU32(Theme.TextDisabled), description);
+            Theme.ToU32(Theme.WithAlpha(Theme.P.Muted, 0.4f)), description);
 
         DrawToggleAt(dl, tMin, enabled, tHov, toggleId);
 
@@ -106,7 +103,7 @@ public static partial class Widgets
             dl.AddRectFilled(
                 new Vector2(origin.X, sepY),
                 new Vector2(origin.X + contentW, sepY + 1f),
-                SeparatorColor);
+                Theme.ToU32(Theme.P.Sep));
             ImGuiNET.ImGui.Dummy(new Vector2(0f, 8f));
         }
 
@@ -119,20 +116,13 @@ public static partial class Widgets
         ImGuiNET.ImGui.Unindent(ContentIndent);
         ImGuiNET.ImGui.EndChild();
         PopSectionStyle();
-        ImGuiNET.ImGui.Dummy(new Vector2(0f, SectionGap));
-    }
-
-    private static uint SectionChildId(string kind)
-    {
-        ImGuiNET.ImGui.PushID(_sectionId);
-        var id = ImGuiNET.ImGui.GetID(kind);
         ImGuiNET.ImGui.PopID();
-        return id;
+        ImGuiNET.ImGui.Dummy(new Vector2(0f, SectionGap));
     }
 
     private static void PushSectionStyle()
     {
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.ChildBg, SectionBg);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.ChildBg, Theme.P.Deep);
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, SectionRound);
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(SectionPad, SectionPad));
     }
@@ -141,15 +131,5 @@ public static partial class Widgets
     {
         ImGuiNET.ImGui.PopStyleVar(2);
         ImGuiNET.ImGui.PopStyleColor();
-    }
-
-    private static void DrawSectionBorder()
-    {
-        var dl  = ImGuiNET.ImGui.GetWindowDrawList();
-        var pos = ImGuiNET.ImGui.GetWindowPos();
-        var sz  = ImGuiNET.ImGui.GetWindowSize();
-
-        dl.AddRect(pos, new Vector2(pos.X + sz.X, pos.Y + sz.Y),
-            SectionBorder, SectionRound, ImDrawFlags.None, 1f);
     }
 }

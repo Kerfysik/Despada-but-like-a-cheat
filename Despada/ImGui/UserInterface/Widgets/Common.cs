@@ -4,19 +4,12 @@
 
 using System.Numerics;
 using System.Runtime.InteropServices;
-using Despada.ImGui;
 using ImGuiNET;
 
 namespace Despada.ImGui.UserInterface;
 
 public static partial class Widgets
 {
-    private static int _sectionId;
-
-    private static readonly Vector4 SectionBg      = Theme.Hex(0x141418);
-    private static readonly uint    SectionBorder  = Theme.ToU32(Theme.HexA(0xFFFFFF, 0.08f));
-    private static readonly uint    SeparatorColor = Theme.ToU32(Theme.HexA(0xFFFFFF, 0.08f));
-
     private const float SectionPad    = 12f;
     private const float SectionGap    = 14f;
     private const float SectionRound  = 10f;
@@ -27,10 +20,9 @@ public static partial class Widgets
     private const int StateSweepEvery = 120;
     private const int StateTtlFrames  = 600;
 
+    /// <summary>Call once per frame before drawing widgets: drops state of widgets no longer drawn.</summary>
     public static void ResetFrame()
     {
-        _sectionId = 0;
-
         var frame = ImGuiNET.ImGui.GetFrameCount();
         if (frame % StateSweepEvery != 0) return;
 
@@ -108,6 +100,14 @@ public static partial class Widgets
         var pressed = ImGuiNET.ImGui.InvisibleButton(id, size);
         hovered = ImGuiNET.ImGui.IsItemHovered();
         return pressed;
+    }
+
+    /// <summary>Muted text that is never treated as a printf format.</summary>
+    private static void MutedText(string text)
+    {
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Theme.P.Muted);
+        ImGuiNET.ImGui.TextUnformatted(text);
+        ImGuiNET.ImGui.PopStyleColor();
     }
 
     private static string DisplayLabel(string label)

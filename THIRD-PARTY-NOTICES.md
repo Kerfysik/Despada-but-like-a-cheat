@@ -44,7 +44,9 @@ License: MIT (`licenses/MIT.txt`)
 ## JetBrains Mono Nerd Font
 
 Embedded into `Despada.dll` as
-`Assets/JetBrainsMonoNerdFontMono-Regular.ttf`.
+`Assets/JetBrainsMonoNerdFontMono-Regular.ttf`, plus
+`Assets/JetBrainsMono-ExtraBold-Caps.ttf`: the ExtraBold weight subset to A–Z
+(header wordmark only).
 
 Base typeface: JetBrains Mono — https://github.com/JetBrains/JetBrainsMono
 Patched by Nerd Fonts — https://github.com/ryanoasis/nerd-fonts

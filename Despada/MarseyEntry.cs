@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 using System.Reflection;
+using Despada.Config;
 using HarmonyLib;
 
 public static class MarseyEntry
@@ -19,6 +20,7 @@ public static class MarseyEntry
             return;
         }
 
+        DespadaConfig.Load();
         PatchAll(Assembly.GetExecutingAssembly());
 
         Sedition.Hide();

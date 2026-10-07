@@ -7,158 +7,210 @@ using ImGuiNET;
 
 namespace Despada.ImGui;
 
+// Semantic colour tokens (AGS palette: Catppuccin Macchiato on the bar's navy glass,
+// Latte-based light variant). Widgets and windows read colours only from here.
+public sealed class Palette
+{
+    public required Vector3 Glass;      // window background, alpha from config
+    public required Vector4 Deep;       // tinted strips: input line, tab rows
+    public required Vector4 Raised;     // frames, hovered rows
+    public required Vector4 Pop;        // popups
+    public required Vector4 Line;       // outlines, separators
+    public required Vector4 Sep;
+    public required Vector4 Fg;
+    public required Vector4 Sub;
+    public required Vector4 Muted;
+    public required Vector4 Accent;     // blue: prompt, caret, cursor, active state
+    public required Vector4 Accent2;    // mauve: secondary highlights
+    public required Vector4 Link;
+    public required Vector4 Green;
+    public required Vector4 Yellow;
+    public required Vector4 Red;
+    public required Vector4 Shadow;
+}
+
 public static class Theme
 {
-    public static readonly Vector4 BgDeep       = Hex(0x08080C);
-    public static readonly Vector4 BgBase       = Hex(0x0C0C10);
-    public static readonly Vector4 BgSurface    = Hex(0x141418);
-    public static readonly Vector4 BgElevated   = Hex(0x1A1A20);
-    public static readonly Vector4 BgHover      = Hex(0x222228);
-
-    public static readonly Vector4 Cyan         = Hex(0x9B30FF);
-    public static readonly Vector4 CyanDim      = HexA(0x9B30FF, 0.70f);
-    public static readonly Vector4 CyanMuted    = HexA(0x9B30FF, 0.15f);
-    public static readonly Vector4 CyanGlow     = HexA(0x9B30FF, 0.35f);
-
-    public static readonly Vector4 Magenta      = Hex(0xFF3090);
-    public static readonly Vector4 MagentaDim   = HexA(0xFF3090, 0.70f);
-    public static readonly Vector4 MagentaMuted = HexA(0xFF3090, 0.15f);
-
-    public static readonly Vector4 Violet       = Hex(0x6B2FD6);
-    public static readonly Vector4 VioletDim    = HexA(0x6B2FD6, 0.70f);
-    public static readonly Vector4 VioletMuted  = HexA(0x6B2FD6, 0.15f);
-
-    public static readonly Vector4 Green        = Hex(0x00E870);
-    public static readonly Vector4 GreenDim     = HexA(0x00E870, 0.70f);
-    public static readonly Vector4 GreenMuted   = HexA(0x00E870, 0.18f);
-
-    public static readonly Vector4 Red          = Hex(0xFF1A4A);
-    public static readonly Vector4 RedDim       = HexA(0xFF1A4A, 0.70f);
-    public static readonly Vector4 RedMuted     = HexA(0xFF1A4A, 0.18f);
-
-    public static readonly Vector4 Yellow       = Hex(0xFFD700);
-    public static readonly Vector4 YellowMuted  = HexA(0xFFD700, 0.18f);
-
-    public static readonly Vector4 TextPrimary  = Hex(0xE0E0E8);
-    public static readonly Vector4 TextSecondary= Hex(0x888898);
-    public static readonly Vector4 TextDisabled = Hex(0x505060);
-
-    public static readonly Vector4 Border       = HexA(0xFFFFFF, 0.08f);
-    public static readonly Vector4 BorderHover  = HexA(0xFFFFFF, 0.15f);
-    public static readonly Vector4 BorderActive = HexA(0x9B30FF, 0.40f);
-
-    public static readonly Vector4 ScrollBg     = HexA(0x000000, 0.10f);
-    public static readonly Vector4 ScrollGrab   = HexA(0xFFFFFF, 0.10f);
-    public static readonly Vector4 ScrollHover  = HexA(0xFFFFFF, 0.18f);
-    public static readonly Vector4 ScrollActive = HexA(0xFFFFFF, 0.25f);
-
-    public static void Apply()
+    public static readonly Palette Dark = new()
     {
+        Glass   = Rgb(0x161B2B),
+        Deep    = HexA(0x000000, 0.16f),
+        Raised  = HexA(0x2A3447, 0.70f),
+        Pop     = HexA(0x1A1F2E, 0.99f),
+        Line    = Hex(0x3A4665),
+        Sep     = HexA(0x6E738D, 0.45f),
+        Fg      = Hex(0xCAD3F5),
+        Sub     = Hex(0xA5ADCB),
+        Muted   = Hex(0x8087A2),
+        Accent  = Hex(0x8AADF4),
+        Accent2 = Hex(0xC6A0F6),
+        Link    = Hex(0x91D7E3),
+        Green   = Hex(0xA6DA95),
+        Yellow  = Hex(0xEED49F),
+        Red     = Hex(0xED8796),
+        Shadow  = HexA(0x000000, 0.45f),
+    };
+
+    public static readonly Palette Light = new()
+    {
+        Glass   = Rgb(0xEFF1F8),
+        Deep    = HexA(0x2B3150, 0.05f),
+        Raised  = HexA(0xFFFFFF, 0.85f),
+        Pop     = HexA(0xFAFBFD, 0.99f),
+        Line    = Hex(0xC3CADF),
+        Sep     = HexA(0x7882AA, 0.40f),
+        Fg      = Hex(0x2B3150),
+        Sub     = Hex(0x4C5373),
+        Muted   = Hex(0x5C6383),
+        Accent  = Hex(0x1E66F5),
+        Accent2 = Hex(0x8839EF),
+        Link    = Hex(0x0B7FAD),
+        Green   = Hex(0x3D8F2A),
+        Yellow  = Hex(0x9A6309),
+        Red     = Hex(0xD20F39),
+        Shadow  = HexA(0x1E233C, 0.25f),
+    };
+
+    // Logo gradient stays the AGS signature red → mauve → blue in both themes.
+    public static readonly Vector4 LogoRed  = Hex(0xED8796);
+    public static readonly Vector4 LogoBlue = Hex(0x8AADF4);
+
+    public static Palette P { get; private set; } = Dark;
+    public static float GlassAlpha { get; private set; } = 0.92f;
+
+    // Metrics are written as 1080p pixels and converted to logical units (see UiScale).
+    private const float D = UiScale.DesignHeight / 1080f;
+
+    public const float WindowRounding = 18f * D;
+    public const float SmallRounding  = 10f * D;
+
+    private static bool _sizesScaled;
+
+    public static Vector4 WindowBg => new(P.Glass, GlassAlpha);
+
+    // Selection / active tint: accent at low alpha; SelR is the right end of the gradient variant.
+    // Same alpha on both: Gfx.Shade keeps the vertex alpha of the left colour anyway.
+    public static Vector4 Sel  => WithAlpha(P.Accent, IsLight ? 0.13f : 0.20f);
+    public static Vector4 SelR => WithAlpha(P.Accent2, IsLight ? 0.13f : 0.20f);
+
+    public static bool IsLight => ReferenceEquals(P, Light);
+
+    public static void Apply(bool light, float glassAlpha)
+    {
+        P = light ? Light : Dark;
+        GlassAlpha = Math.Clamp(glassAlpha, 0.5f, 1f);
+
         var style  = ImGuiNET.ImGui.GetStyle();
         var colors = style.Colors;
-        
-        style.AntiAliasedLines = true;
+
+        // Once per context for everything not set below; the values set below are absolute.
+        if (!_sizesScaled)
+        {
+            style.ScaleAllSizes(D);
+            _sizesScaled = true;
+        }
+
+        style.AntiAliasedLines       = true;
         style.AntiAliasedLinesUseTex = false;
-        style.AntiAliasedFill = true;
-            
-        style.WindowRounding    = 8f;
-        style.ChildRounding     = 6f;
-        style.FrameRounding     = 5f;
+        style.AntiAliasedFill        = true;
+
+        style.WindowRounding    = WindowRounding;
+        style.ChildRounding     = SmallRounding;
+        style.FrameRounding     = 8f;
         style.PopupRounding     = 6f;
         style.ScrollbarRounding = 4f;
         style.GrabRounding      = 4f;
-        style.TabRounding       = 5f;
+        style.TabRounding       = 8f;
 
-        style.WindowBorderSize  = 1f;
+        style.WindowBorderSize  = 0f;
         style.ChildBorderSize   = 0f;
         style.FrameBorderSize   = 0f;
         style.PopupBorderSize   = 1f;
         style.TabBorderSize     = 0f;
 
-        style.WindowPadding      = new Vector2(12f, 12f);
-        style.FramePadding       = new Vector2(10f, 6f);
-        style.ItemSpacing        = new Vector2(8f, 7f);
-        style.ItemInnerSpacing   = new Vector2(6f, 4f);
-        style.IndentSpacing      = 20f;
-        style.ScrollbarSize      = 12f;
-        style.GrabMinSize        = 10f;
+        style.WindowPadding    = new Vector2(12f, 12f);
+        style.FramePadding     = new Vector2(10f, 6f);
+        style.ItemSpacing      = new Vector2(8f, 7f);
+        style.ItemInnerSpacing = new Vector2(6f, 4f);
+        style.IndentSpacing    = 20f;
+        style.ScrollbarSize    = 10f;
+        style.GrabMinSize      = 10f;
+        // Small on purpose (toasts are 280×64); the main window sets its own constraints.
+        style.WindowMinSize    = new Vector2(32f, 32f) * D;
 
-        style.WindowTitleAlign   = new Vector2(0.5f, 0.5f);
-        style.AntiAliasedLines   = true;
-        style.AntiAliasedFill    = true;
+        colors[(int)ImGuiCol.WindowBg]       = WindowBg;
+        colors[(int)ImGuiCol.ChildBg]        = Vector4.Zero;
+        colors[(int)ImGuiCol.PopupBg]        = P.Pop;
+        colors[(int)ImGuiCol.Border]         = P.Line;
+        colors[(int)ImGuiCol.BorderShadow]   = Vector4.Zero;
 
-        colors[(int)ImGuiCol.WindowBg]           = BgBase;
-        colors[(int)ImGuiCol.ChildBg]            = BgSurface;
-        colors[(int)ImGuiCol.PopupBg]            = BgElevated;
+        colors[(int)ImGuiCol.Text]           = P.Fg;
+        colors[(int)ImGuiCol.TextDisabled]   = P.Muted;
+        colors[(int)ImGuiCol.TextSelectedBg] = WithAlpha(P.Accent, 0.35f);
+        colors[(int)ImGuiCol.TextLink]       = P.Link;
 
-        colors[(int)ImGuiCol.Border]             = Border;
-        colors[(int)ImGuiCol.BorderShadow]       = Vector4.Zero;
+        colors[(int)ImGuiCol.FrameBg]        = P.Deep;
+        colors[(int)ImGuiCol.FrameBgHovered] = P.Raised;
+        colors[(int)ImGuiCol.FrameBgActive]  = Sel;
 
-        colors[(int)ImGuiCol.TitleBg]            = BgDeep;
-        colors[(int)ImGuiCol.TitleBgActive]      = BgSurface;
-        colors[(int)ImGuiCol.TitleBgCollapsed]   = BgDeep;
+        colors[(int)ImGuiCol.Button]         = Vector4.Zero;
+        colors[(int)ImGuiCol.ButtonHovered]  = P.Raised;
+        colors[(int)ImGuiCol.ButtonActive]   = Sel;
 
-        colors[(int)ImGuiCol.Text]               = TextPrimary;
-        colors[(int)ImGuiCol.TextDisabled]       = TextDisabled;
-        colors[(int)ImGuiCol.TextSelectedBg]     = CyanGlow;
+        colors[(int)ImGuiCol.Header]         = Sel;
+        colors[(int)ImGuiCol.HeaderHovered]  = P.Raised;
+        colors[(int)ImGuiCol.HeaderActive]   = Sel;
 
-        colors[(int)ImGuiCol.FrameBg]            = BgElevated;
-        colors[(int)ImGuiCol.FrameBgHovered]     = BgHover;
-        colors[(int)ImGuiCol.FrameBgActive]      = CyanMuted;
+        colors[(int)ImGuiCol.CheckMark]        = P.Accent;
+        colors[(int)ImGuiCol.SliderGrab]       = P.Accent;
+        colors[(int)ImGuiCol.SliderGrabActive] = P.Accent2;
 
-        colors[(int)ImGuiCol.Button]             = BgElevated;
-        colors[(int)ImGuiCol.ButtonHovered]      = BgHover;
-        colors[(int)ImGuiCol.ButtonActive]       = CyanMuted;
+        colors[(int)ImGuiCol.ScrollbarBg]          = Vector4.Zero;
+        colors[(int)ImGuiCol.ScrollbarGrab]        = WithAlpha(P.Muted, 0.35f);
+        colors[(int)ImGuiCol.ScrollbarGrabHovered] = WithAlpha(P.Muted, 0.55f);
+        colors[(int)ImGuiCol.ScrollbarGrabActive]  = WithAlpha(P.Muted, 0.75f);
 
-        colors[(int)ImGuiCol.Header]             = CyanMuted;
-        colors[(int)ImGuiCol.HeaderHovered]      = CyanGlow;
-        colors[(int)ImGuiCol.HeaderActive]       = HexA(0x9B30FF, 0.45f);
+        colors[(int)ImGuiCol.Separator]        = P.Sep;
+        colors[(int)ImGuiCol.SeparatorHovered] = P.Accent;
+        colors[(int)ImGuiCol.SeparatorActive]  = P.Accent2;
 
-        colors[(int)ImGuiCol.CheckMark]          = Cyan;
-        colors[(int)ImGuiCol.SliderGrab]         = CyanDim;
-        colors[(int)ImGuiCol.SliderGrabActive]   = Cyan;
+        colors[(int)ImGuiCol.ResizeGrip]        = Vector4.Zero;
+        colors[(int)ImGuiCol.ResizeGripHovered] = WithAlpha(P.Accent, 0.5f);
+        colors[(int)ImGuiCol.ResizeGripActive]  = P.Accent;
 
-        colors[(int)ImGuiCol.ScrollbarBg]          = ScrollBg;
-        colors[(int)ImGuiCol.ScrollbarGrab]        = ScrollGrab;
-        colors[(int)ImGuiCol.ScrollbarGrabHovered] = ScrollHover;
-        colors[(int)ImGuiCol.ScrollbarGrabActive]  = ScrollActive;
+        colors[(int)ImGuiCol.Tab]         = Vector4.Zero;
+        colors[(int)ImGuiCol.TabHovered]  = P.Raised;
+        colors[(int)ImGuiCol.TabSelected] = Sel;
 
-        colors[(int)ImGuiCol.Separator]          = Border;
-        colors[(int)ImGuiCol.SeparatorHovered]   = CyanDim;
-        colors[(int)ImGuiCol.SeparatorActive]    = Cyan;
+        colors[(int)ImGuiCol.TableHeaderBg]     = P.Deep;
+        colors[(int)ImGuiCol.TableBorderStrong] = P.Sep;
+        colors[(int)ImGuiCol.TableBorderLight]  = WithAlpha(P.Sep, 0.5f);
+        colors[(int)ImGuiCol.TableRowBg]        = Vector4.Zero;
+        colors[(int)ImGuiCol.TableRowBgAlt]     = P.Deep;
 
-        colors[(int)ImGuiCol.ResizeGrip]         = Vector4.Zero;
-        colors[(int)ImGuiCol.ResizeGripHovered]  = Vector4.Zero;
-        colors[(int)ImGuiCol.ResizeGripActive]   = Vector4.Zero;
-
-        colors[(int)ImGuiCol.Tab]                = BgSurface;
-        colors[(int)ImGuiCol.TabHovered]         = CyanMuted;
-        colors[(int)ImGuiCol.TabSelected]        = CyanGlow;
-
-        colors[(int)ImGuiCol.TableHeaderBg]      = BgSurface;
-        colors[(int)ImGuiCol.TableBorderStrong]  = Border;
-        colors[(int)ImGuiCol.TableBorderLight]   = HexA(0xFFFFFF, 0.04f);
-
-        colors[(int)ImGuiCol.ModalWindowDimBg]   = HexA(0x000000, 0.60f);
-        colors[(int)ImGuiCol.NavWindowingHighlight] = Cyan;
+        colors[(int)ImGuiCol.NavCursor]             = P.Accent;
+        colors[(int)ImGuiCol.ModalWindowDimBg]      = HexA(0x000000, 0.35f);
+        colors[(int)ImGuiCol.NavWindowingHighlight] = P.Accent;
+        colors[(int)ImGuiCol.DragDropTarget]        = P.Accent2;
     }
-    
-    public static Vector4 Hex(uint rgb)
-    {
-        float r = ((rgb >> 16) & 0xFF) / 255f;
-        float g = ((rgb >> 8)  & 0xFF) / 255f;
-        float b = ( rgb        & 0xFF) / 255f;
-        return new Vector4(r, g, b, 1f);
-    }
+
+    public static Vector4 Hex(uint rgb) => HexA(rgb, 1f);
 
     public static Vector4 HexA(uint rgb, float a)
     {
-        float r = ((rgb >> 16) & 0xFF) / 255f;
-        float g = ((rgb >> 8)  & 0xFF) / 255f;
-        float b = ( rgb        & 0xFF) / 255f;
-        return new Vector4(r, g, b, a);
+        var c = Rgb(rgb);
+        return new Vector4(c, a);
     }
 
-    public static uint ToU32(Vector4 c) => ImGuiNET.ImGui.ColorConvertFloat4ToU32(c);
+    private static Vector3 Rgb(uint rgb) => new(
+        ((rgb >> 16) & 0xFF) / 255f,
+        ((rgb >> 8) & 0xFF) / 255f,
+        (rgb & 0xFF) / 255f);
+
+    // Goes through ImGui so style.Alpha (and with it BeginDisabled) dims custom-drawn widgets too.
+    public static uint ToU32(Vector4 c) => ImGuiNET.ImGui.GetColorU32(c);
+
     public static Vector4 WithAlpha(Vector4 c, float a) => new(c.X, c.Y, c.Z, a);
+
+    public static Vector4 Mix(Vector4 a, Vector4 b, float t) => a + (b - a) * t;
 }

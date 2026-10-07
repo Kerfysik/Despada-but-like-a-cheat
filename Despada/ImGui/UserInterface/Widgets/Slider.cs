@@ -16,14 +16,13 @@ public static partial class Widgets
     private const float SliderBoxPad = 16f;
     private const float ArrowBtnW    = 18f;
 
-    private static readonly uint TrackBorder = Theme.ToU32(Theme.Border);
-    private static readonly uint TrackFillL  = Theme.ToU32(Theme.Violet);
-    private static readonly uint TrackFillR  = Theme.ToU32(Theme.Cyan);
-
     private static readonly StateStore<float> _sliderKnobX = new();
 
+    // Only one value box can be edited at a time. _editSeenFrame detects an editor that stopped
+    // being drawn (tab switched, window hidden) so it is cancelled instead of committing later.
     private static uint   _editSliderId;
     private static int    _editStartFrame;
+    private static int    _editSeenFrame;
     private static string _editBuffer = "";
 
     /// <param name="decimals">Digits after the point — used for display, input and rounding.</param>
@@ -52,6 +51,10 @@ public static partial class Widgets
     private static bool SliderCore(string label, ref double value, double min, double max,
         int decimals, string suffix, double step)
     {
+        decimals = Math.Clamp(decimals, 0, 15);
+        if (_editSliderId != 0 && ImGuiNET.ImGui.GetFrameCount() - _editSeenFrame > 1)
+            _editSliderId = 0;
+
         ImGuiNET.ImGui.Spacing();
         ImGuiNET.ImGui.PushID(label);
 
@@ -98,20 +101,22 @@ public static partial class Widgets
         {
             if (ButtonAt("##box", boxMin, new Vector2(SliderBoxW, boxH), out var boxHov))
             {
+                // The click lands on mouse release; the editor first draws (and takes focus) next frame.
                 _editSliderId   = boxId;
-                _editStartFrame = ImGuiNET.ImGui.GetFrameCount();
+                _editStartFrame = -1;
+                _editSeenFrame  = ImGuiNET.ImGui.GetFrameCount();
                 _editBuffer     = FormatValue(value, decimals);
             }
 
-            dl.AddRectFilled(boxMin, boxMax, Theme.ToU32(SectionBg), boxRound);
-            dl.AddRect(boxMin, boxMax, Theme.ToU32(boxHov ? Theme.BorderHover : Theme.Border), boxRound);
+            dl.AddRectFilled(boxMin, boxMax, Theme.ToU32(Theme.P.Deep), boxRound);
+            dl.AddRect(boxMin, boxMax, Theme.ToU32(boxHov ? Theme.P.Line : Theme.P.Sep), boxRound);
 
             var valueStr   = FormatValue(value, decimals);
             var displayVal = string.IsNullOrEmpty(suffix) ? valueStr : $"{valueStr} {suffix}";
             var vSz = ImGuiNET.ImGui.CalcTextSize(displayVal);
             dl.AddText(
                 new Vector2(boxMin.X + (SliderBoxW - vSz.X) * 0.5f, boxMin.Y + (boxH - vSz.Y) * 0.5f),
-                Theme.ToU32(Theme.TextPrimary), displayVal);
+                Theme.ToU32(Theme.P.Fg), displayVal);
         }
 
         if (showArrows)
@@ -145,24 +150,26 @@ public static partial class Widgets
         var trkMax = new Vector2(pos.X + trackW, trkMin.Y + SliderTrackH);
         var trkR   = SliderTrackH * 0.5f;
 
-        dl.AddRectFilled(trkMin, trkMax, Theme.ToU32(SectionBg), trkR);
-        dl.AddRect(trkMin, trkMax, TrackBorder, trkR);
+        dl.AddRectFilled(trkMin, trkMax, Theme.ToU32(Theme.P.Deep), trkR);
+        dl.AddRect(trkMin, trkMax, Theme.ToU32(Theme.P.Sep), trkR);
 
         if (frac > 0.005f)
         {
+            var fillL   = Theme.ToU32(Theme.P.Accent);
+            var fillR   = Theme.ToU32(Theme.P.Accent2);
             var fillMax = new Vector2(pos.X + trackW * frac, trkMax.Y);
-            dl.AddRectFilled(trkMin, fillMax, TrackFillL, trkR);
+            dl.AddRectFilled(trkMin, fillMax, fillL, trkR);
             dl.AddRectFilledMultiColor(
                 new Vector2(trkMin.X + trkR, trkMin.Y),
                 new Vector2(fillMax.X, trkMax.Y),
-                TrackFillL, TrackFillR, TrackFillR, TrackFillL);
+                fillL, fillR, fillR, fillL);
         }
 
         var knobT = Animate(ImGuiNET.ImGui.GetID("##knob"), active);
 
         var knobX  = pos.X + trackW * frac;
         var knobCY = trackY + knobH * 0.5f;
-        var knobColor = (hovered || active) ? Theme.Hex(0xFFFFFF) : Theme.HexA(0xFFFFFF, 0.85f);
+        var knobColor = (hovered || active) ? Theme.P.Fg : Theme.WithAlpha(Theme.P.Fg, 0.85f);
 
         var pillW = 4f;
         var pillH = 7f + 2f * knobT;
@@ -195,12 +202,12 @@ public static partial class Widgets
         var pressed = ButtonAt(id, min, new Vector2(ArrowBtnW, h), out var hov);
         var max = new Vector2(min.X + ArrowBtnW, min.Y + h);
 
-        dl.AddRectFilled(min, max, Theme.ToU32(hov ? Theme.BgHover : Theme.BgElevated), 4f, corners);
+        dl.AddRectFilled(min, max, Theme.ToU32(hov ? Theme.Mix(Theme.P.Raised, Theme.P.Sep, 0.5f) : Theme.P.Raised), 4f, corners);
 
         var sz = ImGuiNET.ImGui.CalcTextSize(glyph);
         dl.AddText(
             new Vector2(min.X + (ArrowBtnW - sz.X) * 0.5f, min.Y + (h - sz.Y) * 0.5f),
-            Theme.ToU32(hov ? Theme.TextPrimary : Theme.TextSecondary), glyph);
+            Theme.ToU32(hov ? Theme.P.Fg : Theme.P.Muted), glyph);
 
         return pressed;
     }
@@ -211,18 +218,22 @@ public static partial class Widgets
     {
         var maxLen = (uint)Math.Max(FormatValue(min, decimals).Length, FormatValue(max, decimals).Length);
         var frame  = ImGuiNET.ImGui.GetFrameCount();
+        _editSeenFrame = frame;
 
         var fontH = ImGuiNET.ImGui.GetFontSize();
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(8f, MathF.Max(0f, (boxH - fontH) * 0.5f)));
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f);
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 0f);
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBg, SectionBg);
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Border, Theme.BorderActive);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBg, Theme.P.Deep);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Border, Theme.WithAlpha(Theme.P.Accent, 0.6f));
 
         ImGuiNET.ImGui.SetCursorScreenPos(boxMin);
         ImGuiNET.ImGui.SetNextItemWidth(SliderBoxW);
-        if (frame == _editStartFrame)
+        if (_editStartFrame < 0)
+        {
+            _editStartFrame = frame;
             ImGuiNET.ImGui.SetKeyboardFocusHere();
+        }
 
         ImGuiNET.ImGui.InputText("##edit", ref _editBuffer, maxLen,
             ImGuiInputTextFlags.CharsDecimal | ImGuiInputTextFlags.AutoSelectAll);

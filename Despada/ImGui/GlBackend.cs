@@ -211,6 +211,22 @@ internal static unsafe class GlBackend
         return p is null ? "" : Marshal.PtrToStringUTF8((nint)p) ?? "";
     }
 
+    private static int _isGles = -1;
+
+    // GLES contexts lack glPolygonMode / GL_FRAMEBUFFER_SRGB and want "es" shaders. Cached on first use.
+    public static bool IsGles
+    {
+        get
+        {
+            if (_isGles < 0)
+            {
+                EnsureLoaded();
+                _isGles = GetString(0x1F02 /*GL_VERSION*/).StartsWith("OpenGL ES", StringComparison.Ordinal) ? 1 : 0;
+            }
+            return _isGles == 1;
+        }
+    }
+
     // Header for our shaders, matching the context Clyde actually created:
     // macOS core profiles reject "#version 130", GLES needs the "es" variant and a precision.
     public static string ShaderHeader()

@@ -23,21 +23,16 @@ public static partial class Widgets
         var max    = new Vector2(pos.X + ToggleW, pos.Y + ToggleH);
         var radius = ToggleH * 0.5f;
 
-        var offColor = hovered ? Theme.BgHover : Theme.BgElevated;
-        var onColor  = hovered ? Theme.Cyan : Theme.CyanDim;
-        var tc = new Vector4(
-            offColor.X + (onColor.X - offColor.X) * t,
-            offColor.Y + (onColor.Y - offColor.Y) * t,
-            offColor.Z + (onColor.Z - offColor.Z) * t,
-            offColor.W + (onColor.W - offColor.W) * t);
+        var offColor = hovered ? Theme.Mix(Theme.P.Raised, Theme.P.Sep, 0.5f) : Theme.P.Raised;
+        var onColor  = hovered ? Theme.P.Accent : Theme.WithAlpha(Theme.P.Accent, 0.75f);
 
-        dl.AddRectFilled(min, max, Theme.ToU32(tc), radius);
+        dl.AddRectFilled(min, max, Theme.ToU32(Theme.Mix(offColor, onColor, t)), radius);
 
         if (t > 0.01f)
         {
             var gradAlpha = t * 0.25f;
-            var gradL = Theme.ToU32(Theme.HexA(0x6B2FD6, gradAlpha));
-            var gradR = Theme.ToU32(Theme.HexA(0xFF3090, gradAlpha));
+            var gradL = Theme.ToU32(Theme.WithAlpha(Theme.P.Accent, gradAlpha));
+            var gradR = Theme.ToU32(Theme.WithAlpha(Theme.P.Accent2, gradAlpha));
             var inset = radius;
 
             dl.AddRectFilledMultiColor(
@@ -51,7 +46,7 @@ public static partial class Widgets
         var knobX   = knobOff + (knobOn - knobOff) * t;
 
         var knobAlpha = 0.4f + 0.6f * t;
-        var knobColor = Theme.HexA(0xFFFFFF, knobAlpha);
+        var knobColor = Theme.WithAlpha(Theme.P.Fg, knobAlpha);
         dl.AddCircleFilled(new Vector2(knobX, min.Y + ToggleH * 0.5f), KnobR, Theme.ToU32(knobColor));
     }
 
@@ -74,9 +69,11 @@ public static partial class Widgets
 
         var contentW = ImGuiNET.ImGui.GetContentRegionAvail().X;
 
+        var lineX = ImGuiNET.ImGui.GetCursorPosX(); // incl. indent; SameLine offsets count from the window edge
+
         ImGuiNET.ImGui.AlignTextToFramePadding();
         ImGuiNET.ImGui.TextUnformatted(DisplayLabel(label));
-        ImGuiNET.ImGui.SameLine(contentW - ToggleW);
+        ImGuiNET.ImGui.SameLine(lineX + contentW - ToggleW);
 
         ImGuiNET.ImGui.PushID(label);
         var result = Toggle("##tgl", ref value);

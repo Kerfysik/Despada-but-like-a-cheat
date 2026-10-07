@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 using System.Numerics;
+using System.Runtime.InteropServices;
 using ImGuiNET;
 
 namespace Despada.ImGui.UserInterface;
@@ -31,38 +32,31 @@ public static partial class Widgets
         }
 
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
-        var t = Animate(itemId, value);
+        var t  = Animate(itemId, value);
 
         var min = pos;
         var max = new Vector2(pos.X + CheckboxSize, pos.Y + CheckboxSize);
 
-        var bgOff = hovered ? Theme.BgHover : Theme.BgElevated;
-        var bgOn  = Theme.Cyan;
-        var bg = new Vector4(
-            bgOff.X + (bgOn.X - bgOff.X) * t,
-            bgOff.Y + (bgOn.Y - bgOff.Y) * t,
-            bgOff.Z + (bgOn.Z - bgOff.Z) * t,
-            bgOff.W + (bgOn.W - bgOff.W) * t);
-
-        dl.AddRectFilled(min, max, Theme.ToU32(bg), CheckboxRound);
+        var bgOff = hovered ? Theme.Mix(Theme.P.Raised, Theme.P.Sep, 0.5f) : Theme.P.Raised;
+        dl.AddRectFilled(min, max, Theme.ToU32(Theme.Mix(bgOff, Theme.P.Accent, t)), CheckboxRound);
 
         if (t < 0.99f)
-            dl.AddRect(min, max, SectionBorder, CheckboxRound, ImDrawFlags.None, 1f);
+            dl.AddRect(min, max, Theme.ToU32(Theme.P.Sep), CheckboxRound, ImDrawFlags.None, 1f);
 
         if (t > 0.01f)
         {
             var cx = pos.X + CheckboxSize * 0.5f;
             var cy = pos.Y + CheckboxSize * 0.5f;
-            var checkCol = Theme.ToU32(Theme.HexA(0xFFFFFF, t));
+            var checkCol = Theme.ToU32(Theme.WithAlpha(Theme.IsLight ? Theme.Hex(0xFFFFFF) : Theme.Hex(0x161B2B), t));
 
-            Vector2[] checkPts =
+            Span<Vector2> checkPts =
             [
                 new(cx - 5.5f, cy + 0.5f),
                 new(cx - 1f,   cy + 5f),
                 new(cx + 6.5f, cy - 4f)
             ];
 
-            dl.AddPolyline(ref checkPts[0], 3, checkCol, ImDrawFlags.None, 3f);
+            dl.AddPolyline(ref MemoryMarshal.GetReference(checkPts), checkPts.Length, checkCol, ImDrawFlags.None, 3f);
         }
 
         return clicked;
@@ -74,9 +68,11 @@ public static partial class Widgets
 
         var contentW = ImGuiNET.ImGui.GetContentRegionAvail().X;
 
+        var lineX = ImGuiNET.ImGui.GetCursorPosX(); // incl. indent; SameLine offsets count from the window edge
+
         ImGuiNET.ImGui.AlignTextToFramePadding();
         ImGuiNET.ImGui.TextUnformatted(DisplayLabel(label));
-        ImGuiNET.ImGui.SameLine(contentW - CheckboxSize);
+        ImGuiNET.ImGui.SameLine(lineX + contentW - CheckboxSize);
 
         ImGuiNET.ImGui.PushID(label);
         var result = Checkbox("##cb", ref value);

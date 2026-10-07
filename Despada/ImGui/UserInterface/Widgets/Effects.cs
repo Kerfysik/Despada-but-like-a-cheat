@@ -36,11 +36,7 @@ public static partial class Widgets
 
             var alpha = s.Life / s.MaxLife;
             var t = 1f - alpha;
-            var color = new Vector4(
-                Theme.Violet.X + (Theme.Magenta.X - Theme.Violet.X) * t,
-                Theme.Violet.Y + (Theme.Magenta.Y - Theme.Violet.Y) * t,
-                Theme.Violet.Z + (Theme.Magenta.Z - Theme.Violet.Z) * t,
-                alpha);
+            var color = Theme.WithAlpha(Theme.Mix(Theme.P.Accent, Theme.P.Accent2, t), alpha);
 
             dl.AddCircleFilled(s.Pos, s.Size * (0.5f + 0.5f * alpha), Theme.ToU32(color));
         }

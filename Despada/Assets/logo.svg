@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 ddepsadd <https://github.com/ddepsadd> -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="6" y1="58" x2="58" y2="6">
+      <stop offset="0" stop-color="#ED8796"/>
+      <stop offset=".5" stop-color="#C6A0F6"/>
+      <stop offset="1" stop-color="#8AADF4"/>
+    </linearGradient>
+  </defs>
+  <path d="M9 16 L25 32 L9 48" fill="none" stroke="url(#g)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M31 28.5 L59 32 L31 35.5 Z" fill="url(#g)"/>
+  <path d="M30 22 V42" stroke="url(#g)" stroke-width="4" stroke-linecap="round"/>
+</svg>

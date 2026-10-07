@@ -5,6 +5,8 @@
 using System.Collections.Concurrent;
 using System.Numerics;
 using System.Reflection;
+using Despada.Config;
+using Despada.ImGui.UserInterface;
 using HarmonyLib;
 using ImGuiNET;
 
@@ -149,11 +151,46 @@ public static class ImGuiInputHook
     // even if the overlay opened or ImGui grabbed focus in between.
     private static readonly HashSet<byte> _gameHeld = new();
 
-    private const string ToggleKeyName = "Delete";
-    private static byte? _toggleKey;
+    private static string? _toggleKeyName;
+    private static byte    _toggleKey;
 
-    // Resolved by name: the engine's Keyboard.Key values shift whenever a key is inserted.
-    private static byte ToggleKey => _toggleKey ??= ResolveKey(ToggleKeyName);
+    // Resolved by name from the config: the engine's Keyboard.Key values shift whenever a key is inserted.
+    private static byte ToggleKey
+    {
+        get
+        {
+            var name = DespadaConfig.Current.ToggleKey;
+            if (name != _toggleKeyName)
+            {
+                _toggleKey     = ResolveKey(name);
+                _toggleKeyName = name;
+            }
+            return _toggleKey;
+        }
+    }
+
+    // Settings "press a key" capture: the next non-repeat keyboard key goes here instead of anywhere
+    // else. Receives the Keyboard.Key name, or null when cancelled (Escape or CancelKeyCapture).
+    private static Action<string?>? _keyCapture;
+
+    public static void BeginKeyCapture(Action<string?> onKey) => _keyCapture = onKey;
+
+    public static void CancelKeyCapture()
+    {
+        var onKey = _keyCapture;
+        _keyCapture = null;
+        onKey?.Invoke(null);
+    }
+
+    // The toggle key always wins over text input, so only keys that never type or edit text can be
+    // bound to it (letters, Enter, arrows, modifiers... would become unusable in text fields).
+    private static bool IsBindable(object key)
+    {
+        var k = KeyMap.ToImGuiKey(key);
+        return k is >= ImGuiKey.F1 and <= ImGuiKey.F24
+            or ImGuiKey.Insert or ImGuiKey.Delete or ImGuiKey.PageUp or ImGuiKey.PageDown
+            or ImGuiKey.Pause or ImGuiKey.ScrollLock or ImGuiKey.PrintScreen;
+    }
 
     private static byte ResolveKey(string name)
     {
@@ -161,6 +198,14 @@ public static class ImGuiInputHook
         if (keyType is not null && Enum.TryParse(keyType, name, out var value))
             return Convert.ToByte(value);
 
+        const string fallbackName = DespadaSettings.DefaultToggleKey;
+        if (keyType is not null && name != fallbackName && Enum.TryParse(keyType, fallbackName, out var fallback))
+        {
+            MarseyLogger.Warn($"[ImGuiInputHook] Keyboard.Key.{name} not found, using {fallbackName}.");
+            return Convert.ToByte(fallback);
+        }
+
+        // Keyboard.Key.Delete at the time of writing (see KeyMap); only hit if the enum can't be found.
         MarseyLogger.Warn($"[ImGuiInputHook] Keyboard.Key.{name} not found, falling back to 83.");
         return 83;
     }
@@ -171,6 +216,24 @@ public static class ImGuiInputHook
         if (key is null) return true;
 
         var keyByte = Convert.ToByte(key);
+
+        if (_keyCapture is not null && ImGuiRenderer.OverlayVisible && !KeyMap.IsMouseKey(key))
+        {
+            if (Read(args, "IsRepeat") is true) return false;
+            var name = Enum.GetName(key.GetType(), key);
+            if (name == "Escape")
+            {
+                CancelKeyCapture();
+                return false;
+            }
+            if (name is null || !IsBindable(key))
+                return false; // swallowed, still waiting
+
+            var onKey = _keyCapture;
+            _keyCapture = null;
+            onKey(name);
+            return false;
+        }
 
         if (keyByte == ToggleKey)
         {
@@ -191,6 +254,21 @@ public static class ImGuiInputHook
             return true;
         }
 
+        var imKey = KeyMap.IsMouseKey(key) ? ImGuiKey.None : KeyMap.ToImGuiKey(key);
+
+        // Alt+key console chords (session keys, Alt+B/F/D): the character must not be typed too.
+        if (ConsolePanel.InputActive && IsAltChordKey(imKey)
+            && Convert.ToBoolean(Read(args, "Alt") ?? false) && !Convert.ToBoolean(Read(args, "Control") ?? false))
+            _suppressText = true;
+
+        // Esc in the console only closes its suggestion list: ImGui would deactivate the field and
+        // the keyboard would go back to the game.
+        if (imKey == ImGuiKey.Escape && ConsolePanel.InputActive)
+        {
+            ConsolePanel.RequestEscape();
+            return false;
+        }
+
         // ImGui always sees the event so its state stays consistent; the game gets it
         // unless ImGui wants this kind of input (hovered window / active text field).
         var isMouse = EnqueueKey(args, key, down: true);
@@ -207,6 +285,9 @@ public static class ImGuiInputHook
         if (key is null) return true;
 
         var keyByte = Convert.ToByte(key);
+
+        // The chord's text event (if SDL sends one at all) comes before the key-up.
+        _suppressText = false;
 
         if (keyByte == ToggleKey && !ImGuiRenderer.Failed)
             return false;
@@ -282,9 +363,23 @@ public static class ImGuiInputHook
         return !WantCaptureMouse;
     }
 
+    // Set by an Alt chord key-down; drops the one text event that key produces. One-shot rather than
+    // "Alt held", so AltGr text on other keys still types.
+    private static bool _suppressText;
+
+    private static bool IsAltChordKey(ImGuiKey k) =>
+        k is ImGuiKey.T or ImGuiKey.C or ImGuiKey.R or ImGuiKey.B or ImGuiKey.F or ImGuiKey.D
+          or ImGuiKey.LeftBracket or ImGuiKey.RightBracket
+          or >= ImGuiKey._1 and <= ImGuiKey._9;
+
     private static bool OnTextEntered(object args)
     {
         if (!ImGuiRenderer.OverlayVisible) return true;
+        if (_suppressText)
+        {
+            _suppressText = false;
+            return false;
+        }
 
         var textObj = Read(args, "Text");
 

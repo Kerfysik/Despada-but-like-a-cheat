@@ -6,6 +6,7 @@ using System.Collections.Concurrent;
 using System.Numerics;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using Despada.Config;
 using Despada.ImGui.Hook;
 using Despada.ImGui.UserInterface;
 using HarmonyLib;
@@ -48,6 +49,11 @@ public static class ImGuiRenderer
     {
         if (_initFailed) return;
 
+        // Wall clock, ticked even while nothing is drawn so a pending save isn't held back.
+        var configDt = (float)_configClock.Elapsed.TotalSeconds;
+        _configClock.Restart();
+        DespadaConfig.Tick(configDt);
+
         if (OverlayVisible != _prevOverlayVisible)
         {
             _prevOverlayVisible = OverlayVisible;
@@ -58,8 +64,24 @@ public static class ImGuiRenderer
             if (_initialized)
                 ImGuiNET.ImGui.GetIO().AddFocusEvent(OverlayVisible);
 
+            try
+            {
+                if (OverlayVisible)
+                    Shell.OnOpened();
+                else
+                    Shell.OnClosed();
+            }
+            catch (Exception ex)
+            {
+                FailHard("Overlay toggle", ex);
+                return;
+            }
+
             if (!OverlayVisible)
+            {
                 UpdateSdlTextInput(false);
+                DespadaConfig.Flush();
+            }
         }
 
         bool hasToasts = !_pendingToasts.IsEmpty || _activeToasts.Count > 0;
@@ -106,13 +128,19 @@ public static class ImGuiRenderer
             io.DisplayFramebufferScale = new Vector2(UiScale.K, UiScale.K);
             io.DeltaTime               = Math.Clamp(elapsedSec, 0.0001f, 0.1f);
 
-            MaybeRebuildFont(io);
-
+            if (_configDirty)
+            {
+                _configDirty = false;
+                ApplyTheme();
+            }
             ImGuiInputHook.FlushEvents();
 
             GlStateGuard.Save();
             try
             {
+                // Inside the guard: a rebuild re-uploads the atlas texture and touches GL state.
+                MaybeRebuildFont(io);
+
                 ImGuiNET.ImGui.NewFrame();
 
                 ImGuiInputHook.SnapshotWantCapture();
@@ -125,6 +153,8 @@ public static class ImGuiRenderer
                     DrawUI();
 
                 ImGuiNET.ImGui.Render();
+                // Blurs the area under the main window for this frame's backdrop (no-op if not requested).
+                GlassBlur.Run(_screenW, _screenH);
                 RenderDrawData(ImGuiNET.ImGui.GetDrawData());
             }
             finally
@@ -283,6 +313,14 @@ public static class ImGuiRenderer
     
     private static float FontScale() => Math.Clamp(_screenH / 1080f, 0.75f, 4f);
 
+    private static bool _configDirty;
+    private static readonly System.Diagnostics.Stopwatch _configClock = System.Diagnostics.Stopwatch.StartNew();
+
+    private static void ApplyTheme()
+        => Theme.Apply(DespadaConfig.Current.Theme == "light", DespadaConfig.Current.GlassOpacity);
+
+    private static void OnConfigChanged() => _configDirty = true;
+
     private static void UpdateScale()
     {
         UiScale.K = FontScale() * (1080f / UiScale.DesignHeight);
@@ -311,10 +349,11 @@ public static class ImGuiRenderer
 
             BuildFontAtlas(io, scale);
 
-            ImGuiNET.ImGui.GetStyle().ScaleAllSizes(scale / UiScale.K);
 
             CreateGlObjects();
-            Theme.Apply();
+            ApplyTheme();
+            DespadaConfig.Changed -= OnConfigChanged;
+            DespadaConfig.Changed += OnConfigChanged;
             MarseyLogger.Info("[ImGuiRenderer] ImGui initialized successfully.");
             _initialized = true;
         }
@@ -338,6 +377,7 @@ public static class ImGuiRenderer
         io.ConfigErrorRecoveryEnableDebugLog = true;
         io.ConfigErrorRecoveryEnableTooltip  = true;
 
+
         // Don't write imgui.ini into the game's working directory.
         io.NativePtr->IniFilename = null;
     }
@@ -349,6 +389,7 @@ public static class ImGuiRenderer
 
     private static void BuildFontAtlas(ImGuiIOPtr io, float scale)
     {
+        WordmarkFont = 0;
         io.Fonts.Clear();
         LoadFont(io, scale);
 
@@ -365,6 +406,8 @@ public static class ImGuiRenderer
 
         if (_fontDataHandle.IsAllocated)    _fontDataHandle.Free();
         if (_glyphRangesHandle.IsAllocated) _glyphRangesHandle.Free();
+        if (_capsDataHandle.IsAllocated)    _capsDataHandle.Free();
+        if (_capsRangesHandle.IsAllocated)  _capsRangesHandle.Free();
 
         _atlasBuiltScale = scale;
         MarseyLogger.Info($"[ImGuiRenderer] Font atlas: {fw}x{fh} (scale={scale:F2}, K={UiScale.K:F2})");
@@ -374,6 +417,8 @@ public static class ImGuiRenderer
     {
         if (_atlasBuiltScale <= 0f) return;
         float scale = FontScale();
+
+        // Resolution changes only; small drift is absorbed by FontGlobalScale.
         if (MathF.Abs(scale - _atlasBuiltScale) / _atlasBuiltScale >= 0.1f)
             BuildFontAtlas(io, scale);
     }
@@ -403,7 +448,7 @@ public static class ImGuiRenderer
         var cfg = new ImFontConfigPtr(ImGuiNative.ImFontConfig_ImFontConfig());
         cfg.FontDataOwnedByAtlas = false;
         cfg.OversampleH          = 2;
-        cfg.OversampleV          = 2;
+        cfg.OversampleV          = 1;
         cfg.PixelSnapH           = true;
 
         var ranges         = BuildGlyphRanges();
@@ -418,6 +463,45 @@ public static class ImGuiRenderer
 
         ImGuiNative.ImFontConfig_destroy(cfg.NativePtr);
         MarseyLogger.Info($"[ImGuiRenderer] Font: {resourceName} @ {fontSize}px (scale={scale:F2})");
+
+        LoadCapsFont(io, scale);
+    }
+
+    private static GCHandle _capsDataHandle;
+    private static GCHandle _capsRangesHandle;
+
+    /// <summary>
+    /// Header wordmark font (JetBrains Mono ExtraBold, A–Z only, ~3 KB). Stored as a raw pointer:
+    /// a static ImFontPtr field would make this type need ImGui.NET at type-load time.
+    /// </summary>
+    public static nint WordmarkFont { get; private set; }
+
+    private static unsafe void LoadCapsFont(ImGuiIOPtr io, float scale)
+    {
+        WordmarkFont = 0;
+        const string resourceName = "Despada.Assets.JetBrainsMono-ExtraBold-Caps.ttf";
+        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName);
+        if (stream is null)
+        {
+            MarseyLogger.Warn($"[ImGuiRenderer] Font not found: '{resourceName}'");
+            return;
+        }
+
+        var data = new byte[stream.Length];
+        stream.ReadExactly(data);
+        _capsDataHandle   = GCHandle.Alloc(data, GCHandleType.Pinned);
+        _capsRangesHandle = GCHandle.Alloc(new ushort[] { 0x0041, 0x005A, 0 }, GCHandleType.Pinned);
+
+        var cfg = new ImFontConfigPtr(ImGuiNative.ImFontConfig_ImFontConfig());
+        cfg.FontDataOwnedByAtlas = false;
+        cfg.OversampleH          = 2;
+        cfg.OversampleV          = 1;
+        cfg.PixelSnapH           = true;
+
+        var font = io.Fonts.AddFontFromMemoryTTF(_capsDataHandle.AddrOfPinnedObject(), data.Length,
+            MathF.Floor(14f * scale), cfg, _capsRangesHandle.AddrOfPinnedObject());
+        ImGuiNative.ImFontConfig_destroy(cfg.NativePtr);
+        WordmarkFont = (nint)font.NativePtr;
     }
 
     private static ushort[] BuildGlyphRanges() =>
@@ -430,6 +514,8 @@ public static class ImGuiRenderer
         0x2190, 0x21FF, // Arrows
         0x2500, 0x259F, // Box Drawing + Block Elements
         0x25A0, 0x25FF, // Geometric Shapes
+        0x2600, 0x26FF, // Misc Symbols: ⚠
+        0x2700, 0x27BF, // Dingbats: ✕ ✓
         0xE000, 0xF8FF, // Private Use (Nerd Font icons)
         0,
     ];
@@ -553,11 +639,13 @@ public static class ImGuiRenderer
 
                 if (clipMax.X <= clipMin.X || clipMax.Y <= clipMin.Y) continue;
 
-                GlBackend.Scissor(
-                    (int)clipMin.X,
-                    (int)(fbHeight - clipMax.Y),
-                    (int)(clipMax.X - clipMin.X),
-                    (int)(clipMax.Y - clipMin.Y));
+                // Round outwards: clip rects are fractional (logical units × K), and truncating the
+                // size separately pulled the top/right scissor edges inside by up to 2 px.
+                var x0 = (int)MathF.Floor(clipMin.X);
+                var y0 = (int)MathF.Floor(clipMin.Y);
+                var x1 = (int)MathF.Ceiling(clipMax.X);
+                var y1 = (int)MathF.Ceiling(clipMax.Y);
+                GlBackend.Scissor(x0, fbHeight - y1, x1 - x0, y1 - y0);
 
                 GlBackend.ActiveTexture(0x84C0);
                 GlBackend.BindTexture(0x0DE1, (uint)cmd.TextureId);
@@ -573,7 +661,7 @@ public static class ImGuiRenderer
 
     private static void DrawUI()
     {
-        WindowGuard.Draw("Despada", MainMenu.Draw);
+        WindowGuard.Draw("Despada", Shell.Draw);
 
         if (ShowMetricsWindow) ImGuiNET.ImGui.ShowMetricsWindow(ref ShowMetricsWindow);
         if (ShowDemoWindow)    ImGuiNET.ImGui.ShowDemoWindow(ref ShowDemoWindow);
@@ -582,6 +670,7 @@ public static class ImGuiRenderer
     public static void Shutdown()
     {
         if (!_initialized) return;
+        GlassBlur.Release();
         if (_fontDataHandle.IsAllocated) _fontDataHandle.Free();
         if (_glyphRangesHandle.IsAllocated) _glyphRangesHandle.Free();
         ImGuiNET.ImGui.DestroyContext();

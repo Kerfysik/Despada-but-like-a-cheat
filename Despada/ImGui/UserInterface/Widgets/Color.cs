@@ -14,6 +14,9 @@ public static partial class Widgets
     {
         public string HexBuffer = "FFFFFFFF";
         public bool HexDirty;
+        public bool    HasHsv;
+        public float   H, S, V;
+        public Vector4 LastColor;
     }
 
     private static readonly StateStore<ColorPickerState?> _colorPickerState = new();
@@ -45,10 +48,11 @@ public static partial class Widgets
 
         var changed   = false;
         var contentW  = ImGuiNET.ImGui.GetContentRegionAvail().X;
-        const string popupId = "##popup";
+        var lineX = ImGuiNET.ImGui.GetCursorPosX(); // incl. indent; SameLine offsets count from the window edge
+        const string popupId = "##color_popup";
 
         ImGuiNET.ImGui.TextUnformatted(DisplayLabel(label));
-        ImGuiNET.ImGui.SameLine(contentW - previewW);
+        ImGuiNET.ImGui.SameLine(lineX + contentW - previewW);
 
         ImGuiNET.ImGui.PushID(label);
 
@@ -72,21 +76,21 @@ public static partial class Widgets
 
         ImGuiNET.ImGui.SetNextWindowSize(new Vector2(popupW, 0f), ImGuiCond.Appearing);
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(popupPad, popupPad));
-        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 10f);
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.PopupBg, Theme.BgElevated);
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Border, Theme.HexA(0xFFFFFF, 0.10f));
+        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.PopupRounding, 10f);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.PopupBg, Theme.P.Pop);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Border, Theme.P.Sep);
 
         if (ImGuiNET.ImGui.BeginPopup(popupId))
         {
             var editColor = color;
-            RgbToHsv(editColor, out var h, out var s, out var v);
+            ResolveHsv(state, editColor, out var h, out var s, out var v);
             var a = editColor.W;
 
             DrawPresetPalette(label, ref editColor, ref changed, presetSize, presetGap, presetCols);
 
             if (changed)
             {
-                RgbToHsv(editColor, out h, out s, out v);
+                ResolveHsv(state, editColor, out h, out s, out v);
                 a = editColor.W;
                 SyncHexBufferFromColor(state, editColor, force: true);
             }
@@ -137,7 +141,7 @@ public static partial class Widgets
 
             if (changed)
             {
-                RgbToHsv(editColor, out h, out s, out v);
+                ResolveHsv(state, editColor, out h, out s, out v);
                 a = editColor.W;
                 SyncHexBufferFromColor(state, editColor, force: true);
             }
@@ -149,6 +153,12 @@ public static partial class Widgets
                 color = editColor;
                 SyncHexBufferFromColor(state, color, force: true);
             }
+
+            state.H = h;
+            state.S = s;
+            state.V = v;
+            state.LastColor = editColor;
+            state.HasHsv = true;
 
             ImGuiNET.ImGui.EndPopup();
         }
@@ -167,6 +177,23 @@ public static partial class Widgets
         return state ??= new ColorPickerState();
     }
 
+    private static void ResolveHsv(ColorPickerState st, Vector4 c, out float h, out float s, out float v)
+    {
+        if (st.HasHsv && ColorsClose(c, st.LastColor))
+        {
+            h = st.H;
+            s = st.S;
+            v = st.V;
+            return;
+        }
+
+        RgbToHsv(c, out h, out s, out v);
+        if (!st.HasHsv) return;
+
+        if (s < 1e-4f || v < 1e-4f) h = st.H;
+        if (v < 1e-4f) s = st.S;
+    }
+
     private static void SyncHexBufferFromColor(ColorPickerState state, Vector4 color, bool force = false)
     {
         if (force || !state.HexDirty)
@@ -178,12 +205,12 @@ public static partial class Widgets
     {
         Vector4[] presets =
         [
-            Theme.Green,
-            Theme.Red,
-            Theme.Cyan,
-            Theme.Violet,
-            Theme.Magenta,
-            Theme.Yellow,
+            Theme.P.Green,
+            Theme.P.Red,
+            Theme.P.Accent,
+            Theme.P.Accent2,
+            Theme.P.Link,
+            Theme.P.Yellow,
             Theme.Hex(0xFFFFFF),
             Theme.Hex(0x000000),
             Theme.Hex(0x00FF00),
@@ -192,7 +219,7 @@ public static partial class Widgets
             Theme.Hex(0xFF66CC)
         ];
 
-        ImGuiNET.ImGui.TextColored(Theme.TextSecondary, "Presets");
+        MutedText("Presets");
 
         for (int i = 0; i < presets.Length; i++)
         {
@@ -251,9 +278,11 @@ public static partial class Widgets
         if (active)
         {
             var mouse = ImGuiNET.ImGui.GetIO().MousePos;
-            s = Math.Clamp((mouse.X - min.X) / size, 0f, 1f);
-            v = Math.Clamp(1f - (mouse.Y - min.Y) / size, 0f, 1f);
-            changed = true;
+            var ns = Math.Clamp((mouse.X - min.X) / size, 0f, 1f);
+            var nv = Math.Clamp(1f - (mouse.Y - min.Y) / size, 0f, 1f);
+            changed = ns != s || nv != v;
+            s = ns;
+            v = nv;
         }
 
         var hueColor = HsvToRgb(h, 1f, 1f, 1f);
@@ -274,7 +303,7 @@ public static partial class Widgets
             Theme.ToU32(Theme.HexA(0x000000, 1f)),
             Theme.ToU32(Theme.HexA(0x000000, 1f)));
 
-        dl.AddRect(min, max, Theme.ToU32(Theme.Border), 8f, ImDrawFlags.None, 1f);
+        dl.AddRect(min, max, Theme.ToU32(Theme.P.Sep), 8f, ImDrawFlags.None, 1f);
 
         var cx = min.X + s * size;
         var cy = min.Y + (1f - v) * size;
@@ -303,8 +332,9 @@ public static partial class Widgets
         if (active)
         {
             var mouseY = ImGuiNET.ImGui.GetIO().MousePos.Y;
-            h = Math.Clamp((mouseY - min.Y) / height, 0f, 1f);
-            changed = true;
+            var nh = Math.Clamp((mouseY - min.Y) / height, 0f, 1f);
+            changed = nh != h;
+            h = nh;
         }
 
         const int segments = 6;
@@ -335,7 +365,7 @@ public static partial class Widgets
                 Theme.ToU32(hues[i + 1]));
         }
 
-        dl.AddRect(min, max, Theme.ToU32(Theme.Border), 6f, ImDrawFlags.None, 1f);
+        dl.AddRect(min, max, Theme.ToU32(Theme.P.Sep), 6f, ImDrawFlags.None, 1f);
 
         float markerY = min.Y + h * height;
         dl.AddRectFilled(
@@ -351,7 +381,7 @@ public static partial class Widgets
     {
         var width = 220f;
 
-        ImGuiNET.ImGui.TextColored(Theme.TextSecondary, $"Alpha: {ToByte01(color.W)}");
+        MutedText($"Alpha: {ToByte01(color.W)}");
 
         var pos = ImGuiNET.ImGui.GetCursorScreenPos();
         ImGuiNET.ImGui.InvisibleButton($"##{label}_alpha_slider", new Vector2(width, height));
@@ -366,8 +396,9 @@ public static partial class Widgets
         if (active)
         {
             var mouseX = ImGuiNET.ImGui.GetIO().MousePos.X;
-            color.W = Math.Clamp((mouseX - min.X) / width, 0f, 1f);
-            changed = true;
+            var na = Math.Clamp((mouseX - min.X) / width, 0f, 1f);
+            changed = na != color.W;
+            color.W = na;
         }
 
         DrawAlphaBackground(dl, min, max, 6f);
@@ -383,7 +414,7 @@ public static partial class Widgets
             Theme.ToU32(right),
             Theme.ToU32(left));
 
-        dl.AddRect(min, max, Theme.ToU32(Theme.Border), 6f, ImDrawFlags.None, 1f);
+        dl.AddRect(min, max, Theme.ToU32(Theme.P.Sep), 6f, ImDrawFlags.None, 1f);
 
         float markerX = min.X + color.W * width;
         dl.AddRectFilled(
@@ -405,7 +436,7 @@ public static partial class Widgets
         var dl  = ImGuiNET.ImGui.GetWindowDrawList();
 
         DrawColorPreview(dl, min, max, color, 1f, 8f);
-        dl.AddRect(min, max, Theme.ToU32(Theme.Border), 8f, ImDrawFlags.None, 1f);
+        dl.AddRect(min, max, Theme.ToU32(Theme.P.Sep), 8f, ImDrawFlags.None, 1f);
     }
 
     private static void DrawRgbaEditors(string label, ref Vector4 color, ref bool changed)
@@ -415,7 +446,7 @@ public static partial class Widgets
         int b = ToByte01(color.Z);
         int a = ToByte01(color.W);
 
-        ImGuiNET.ImGui.TextColored(Theme.TextSecondary, "RGBA");
+        MutedText("RGBA");
 
         ImGuiNET.ImGui.SetNextItemWidth(56f);
         if (ImGuiNET.ImGui.InputInt($"R##{label}_r", ref r, 0, 0))
@@ -451,7 +482,7 @@ public static partial class Widgets
 
     private static void DrawHexEditor(string label, ColorPickerState state, ref Vector4 color, ref bool changed)
     {
-        ImGuiNET.ImGui.TextColored(Theme.TextSecondary, "HEX");
+        MutedText("HEX");
         ImGuiNET.ImGui.SameLine();
 
         ImGuiNET.ImGui.SetNextItemWidth(140f);
