@@ -15,6 +15,9 @@ internal static class Logo
     private const float Tracking    = 0.14f; // em
     private const float GradPeriod  = 4f;    // seconds per full cycle
 
+    // One string per letter, made once (AddText/CalcTextSizeA take strings; Substring every frame allocated).
+    private static readonly string[] Letters = ["D", "E", "S", "P", "A", "D", "A"];
+
     /// <summary>Draws the mark at <paramref name="pos"/> (size × size) and the wordmark after it; returns the total width.</summary>
     public static float DrawWithWordmark(ImDrawListPtr dl, Vector2 pos, float size, float gap)
     {
@@ -53,7 +56,6 @@ internal static class Logo
     // ExtraBold caps with tracking, vertically centred on the mark. Falls back to the body font.
     private static unsafe float DrawWordmark(ImDrawListPtr dl, Vector2 pos, float markSize, uint col)
     {
-        const string text = "DESPADA";
         var font = ImGuiRenderer.WordmarkFont != 0
             ? new ImFontPtr((ImFont*)ImGuiRenderer.WordmarkFont)
             : ImGuiNET.ImGui.GetFont();
@@ -63,12 +65,12 @@ internal static class Logo
 
         var y = pos.Y + (markSize - size) * 0.5f;
         var x = pos.X;
-        for (var i = 0; i < text.Length; i++)
+        for (var i = 0; i < Letters.Length; i++)
         {
-            var glyph = text.Substring(i, 1);
+            var glyph = Letters[i];
             dl.AddText(font, size, new Vector2(x, y), col, glyph);
             x += font.CalcTextSizeA(size, float.MaxValue, 0f, glyph).X;
-            if (i < text.Length - 1) x += size * Tracking;
+            if (i < Letters.Length - 1) x += size * Tracking;
         }
         return x - pos.X;
     }

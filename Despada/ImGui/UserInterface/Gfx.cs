@@ -33,6 +33,25 @@ internal static unsafe class Gfx
             _shade((nint)dl.NativePtr, start, end, p0, p1, c0, c1);
     }
 
+    /// <summary>
+    /// Horizontal hairline: exactly one framebuffer pixel row (the one starting at <paramref name="y"/>,
+    /// snapped), drawn as a plain rect. An anti-aliased 1/K-thick AddLine lands between pixel rows
+    /// whenever K ≠ 1 and smears into two half-bright rows; a 1 px non-AA rect always covers one row
+    /// at full alpha.
+    /// </summary>
+    public static void HLine(ImDrawListPtr dl, float x0, float x1, float y, uint col)
+    {
+        var top = UiScale.Snap(y);
+        dl.AddRectFilled(new Vector2(UiScale.Snap(x0), top), new Vector2(UiScale.Snap(x1), top + 1f / UiScale.K), col);
+    }
+
+    /// <summary>Vertical hairline, see <see cref="HLine"/>. Ends meet an HLine at the same y exactly.</summary>
+    public static void VLine(ImDrawListPtr dl, float x, float y0, float y1, uint col)
+    {
+        var left = UiScale.Snap(x);
+        dl.AddRectFilled(new Vector2(left, UiScale.Snap(y0)), new Vector2(left + 1f / UiScale.K, UiScale.Snap(y1)), col);
+    }
+
     /// <summary>Rounded rect filled with a horizontal gradient.</summary>
     public static void GradientRect(ImDrawListPtr dl, Vector2 min, Vector2 max, Vector4 left, Vector4 right, float rounding)
     {

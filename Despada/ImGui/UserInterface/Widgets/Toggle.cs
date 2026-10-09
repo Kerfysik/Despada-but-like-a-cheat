@@ -31,14 +31,9 @@ public static partial class Widgets
         if (t > 0.01f)
         {
             var gradAlpha = t * 0.25f;
-            var gradL = Theme.ToU32(Theme.WithAlpha(Theme.P.Accent, gradAlpha));
-            var gradR = Theme.ToU32(Theme.WithAlpha(Theme.P.Accent2, gradAlpha));
-            var inset = radius;
-
-            dl.AddRectFilledMultiColor(
-                new Vector2(min.X + inset, min.Y),
-                new Vector2(max.X - inset, max.Y),
-                gradL, gradR, gradR, gradL);
+            // Over the whole rounded track: a rect inset by the radius left a seam where the caps begin.
+            Gfx.GradientRect(dl, min, max, Theme.WithAlpha(Theme.P.Accent, gradAlpha),
+                Theme.WithAlpha(Theme.P.Accent2, gradAlpha), radius);
         }
 
         var knobOff = min.X + KnobR + KnobPad;
@@ -52,13 +47,16 @@ public static partial class Widgets
 
     public static bool Toggle(string id, ref bool value)
     {
+        // A frame-high item with the switch centred in it, so it lines up with what shares its line
+        // (AlignTextToFramePadding text, pills, inputs) instead of hanging from the line's top.
+        var h   = MathF.Max(ToggleH, ImGuiNET.ImGui.GetFrameHeight());
         var pos = ImGuiNET.ImGui.GetCursorScreenPos();
 
-        var clicked = ImGuiNET.ImGui.InvisibleButton(id, new Vector2(ToggleW, ToggleH));
+        var clicked = ImGuiNET.ImGui.InvisibleButton(id, new Vector2(ToggleW, h));
         if (clicked)
             value = !value;
 
-        DrawToggleAt(ImGuiNET.ImGui.GetWindowDrawList(), pos, value,
+        DrawToggleAt(ImGuiNET.ImGui.GetWindowDrawList(), pos + new Vector2(0f, (h - ToggleH) * 0.5f), value,
             ImGuiNET.ImGui.IsItemHovered(), ImGuiNET.ImGui.GetItemID());
         return clicked;
     }

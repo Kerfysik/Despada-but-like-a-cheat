@@ -28,8 +28,16 @@ public static class Shell
     /// <summary>Called when the overlay becomes visible.</summary>
     public static void OnOpened()
     {
+        Clipboard.Refresh();
         if (_section == ConsoleId)
             ConsolePanel.RequestFocus();
+    }
+
+    /// <summary>Switches to the Console section (e.g. to show a command's output).</summary>
+    public static void ShowConsole()
+    {
+        _section = ConsoleId;
+        ConsolePanel.RequestFocus();
     }
 
     /// <summary>Called when the overlay is hidden.</summary>
@@ -149,8 +157,7 @@ public static class Shell
 
         SectionTab(SettingsId, "Settings", winPos.X + width - padX - ImGuiNET.ImGui.CalcTextSize("Settings").X, h);
 
-        dl.AddLine(new Vector2(winPos.X, winPos.Y + h), new Vector2(winPos.X + width, winPos.Y + h),
-            Theme.ToU32(Theme.P.Sep));
+        Gfx.HLine(dl, winPos.X, winPos.X + width, winPos.Y + h, Theme.ToU32(Theme.P.Sep));
 
         ImGuiNET.ImGui.SetCursorPos(new Vector2(0f, h + 1f));
     }
@@ -200,48 +207,5 @@ public static class Shell
     {
         ImGuiNET.ImGui.EndGroup();
         ImGuiNET.ImGui.SetCursorPos(new Vector2(0f, _rowBottom));
-    }
-
-    /// <summary>
-    /// Rounded text pill used for session / document tabs. Returns true when the pill was clicked;
-    /// <paramref name="closeClicked"/> reports a click on its × instead.
-    /// </summary>
-    public static bool Pill(string id, string label, bool active, bool closable, out bool closeClicked)
-    {
-        closeClicked = false;
-
-        var padX   = 10f * D;
-        var h      = ImGuiNET.ImGui.GetFrameHeight();
-        var textW  = ImGuiNET.ImGui.CalcTextSize(label).X;
-        var closeW = closable ? ImGuiNET.ImGui.CalcTextSize("×").X + 8f * D : 0f;
-        var size   = new Vector2(textW + closeW + padX * 2f, h);
-        var pos    = ImGuiNET.ImGui.GetCursorScreenPos();
-
-        var clicked = ImGuiNET.ImGui.InvisibleButton(id, size);
-        var hovered = ImGuiNET.ImGui.IsItemHovered();
-
-        var dl = ImGuiNET.ImGui.GetWindowDrawList();
-        if (active)
-            Gfx.GradientRect(dl, pos, pos + size, Theme.Sel, Theme.SelR, Theme.SmallRounding);
-        else if (hovered)
-            dl.AddRectFilled(pos, pos + size, Theme.ToU32(Theme.P.Raised), Theme.SmallRounding);
-
-        var ty = pos.Y + (h - ImGuiNET.ImGui.GetFontSize()) * 0.5f;
-        dl.AddText(new Vector2(pos.X + padX, ty), Theme.ToU32(active || hovered ? Theme.P.Fg : Theme.P.Muted), label);
-
-        if (closable)
-        {
-            var cx = pos.X + padX + textW + 8f * D;
-            var mouse = ImGuiNET.ImGui.GetIO().MousePos;
-            var overClose = hovered && mouse.X >= cx - 4f * D;
-            dl.AddText(new Vector2(cx, ty), Theme.ToU32(overClose ? Theme.P.Fg : Theme.P.Muted), "×");
-            if (clicked && overClose)
-            {
-                closeClicked = true;
-                clicked = false;
-            }
-        }
-
-        return clicked;
     }
 }

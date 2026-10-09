@@ -80,12 +80,18 @@ internal static unsafe class ConsolePanel
 
     public static void RequestFocus() => _focusInput = true;
 
+    /// <summary>Runs a command in the active session as if typed (it goes into the history too).</summary>
+    public static void Run(string line) => Active.Submit(line);
+
     public static IReadOnlyList<ConsoleSession> Sessions => _sessions;
     public static ConsoleSession Current => Active;
 
     /// <summary>Opens a session with the lowest number not used by an open one.</summary>
     public static void NewSession()
     {
+        // Its own command ("session new") was the last thing printed in the session being left.
+        if (_sessions.Count > 0) Active.Unread = false;
+
         var number = 1;
         while (_sessions.Any(x => x.Number == number)) number++;
 
@@ -127,44 +133,66 @@ internal static unsafe class ConsolePanel
         _ = Active;
         var close = -1;
 
-        for (var i = 0; i < _sessions.Count; i++)
+        // A powerline of sessions. Middle click or Ctrl+click closes one, a double click renames it;
+        // a row too narrow shortens the names, then keeps the active one's neighbours and lists the
+        // rest under "…".
+        _sessions[_active].Unread = false;
+        var plusW  = ImGuiNET.ImGui.CalcTextSize("+").X + 12f * D + 10f * D;
+        var names  = _sessions.Select(x => x.Name).ToList();
+        var labels = Powerline.Fit(names, _active, ImGuiNET.ImGui.GetContentRegionAvail().X - plusW - 12f * D,
+            out var from, out var to);
+        for (var i = from; i <= to; i++)
         {
+            if (i > from) Powerline.Next();
             ImGuiNET.ImGui.PushID(i);
             if (_renaming == i)
-                DrawRenameField(_sessions[i]);
+                DrawRenameField(_sessions[i], i == from);
             else
             {
-                if (Shell.Pill("##s", _sessions[i].Name, i == _active, _sessions.Count > 1, out var closeClicked))
+                var s = _sessions[i];
+                if (Powerline.Segment("##s", labels[i], i == _active, i == from, s.Unread && i != _active,
+                        out var closeRequested))
                 {
                     _active = i;
                     _focusInput = true;
                 }
-                if (closeClicked) close = i;
+                if (closeRequested && _sessions.Count > 1) close = i;
 
                 if (ImGuiNET.ImGui.IsItemHovered() && ImGuiNET.ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
                     StartRename(i);
             }
             ImGuiNET.ImGui.PopID();
-            ImGuiNET.ImGui.SameLine(0f, 4f * D);
+        }
+        if (from > 0 || to < _sessions.Count - 1)
+        {
+            var picked = Powerline.Overflow("##more", names, _active);
+            if (picked >= 0) Select(picked);
         }
 
-        if (Shell.Pill("##new", "+", false, false, out _))
+        Powerline.After(10f * D);
+        if (Powerline.Plus("##new"))
             NewSession();
 
         if (close >= 0)
             CloseSession(_sessions[close]);
     }
 
-    // Enter commits (empty = automatic name); Esc or clicking elsewhere cancels.
-    private static void DrawRenameField(ConsoleSession s)
+    // Enter commits (empty = automatic name); Esc or clicking elsewhere cancels. The field sits in a
+    // segment of its own, so the chain keeps its shape while renaming.
+    private static void DrawRenameField(ConsoleSession s, bool first)
     {
         var frame = ImGuiNET.ImGui.GetFrameCount();
-        var w = MathF.Max(ImGuiNET.ImGui.CalcTextSize(s.Name).X, ImGuiNET.ImGui.CalcTextSize("12345678").X) + 20f * D;
+        var textW = MathF.Max(ImGuiNET.ImGui.CalcTextSize(_renameBuf).X, ImGuiNET.ImGui.CalcTextSize("12345678").X)
+                    + ImGuiNET.ImGui.CalcTextSize("M").X;
+        var y     = ImGuiNET.ImGui.GetCursorScreenPos().Y;
+        var at    = Powerline.BeginField(textW, first, out var endX);
 
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBg, Theme.P.Deep);
-        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, Theme.SmallRounding);
-        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(10f * D, ImGuiNET.ImGui.GetStyle().FramePadding.Y));
-        ImGuiNET.ImGui.SetNextItemWidth(w);
+        ImGuiNET.ImGui.SetCursorScreenPos(at);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBg, Vector4.Zero);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, Vector4.Zero);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBgActive, Vector4.Zero);
+        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(0f, ImGuiNET.ImGui.GetStyle().FramePadding.Y));
+        ImGuiNET.ImGui.SetNextItemWidth(textW);
         if (_renameFocus)
         {
             _renameFocus = false;
@@ -177,8 +205,9 @@ internal static unsafe class ConsolePanel
         // Focus lands a frame after SetKeyboardFocusHere; after that, inactive = cancelled.
         var gone = !commit && frame - _renameStartFrame > 2 && !ImGuiNET.ImGui.IsItemActive();
 
-        ImGuiNET.ImGui.PopStyleVar(2);
-        ImGuiNET.ImGui.PopStyleColor();
+        ImGuiNET.ImGui.PopStyleVar();
+        ImGuiNET.ImGui.PopStyleColor(3);
+        Powerline.EndField(endX, y);
 
         if (commit) RenameSession(s, _renameBuf);
         if (commit || gone)
@@ -200,7 +229,8 @@ internal static unsafe class ConsolePanel
         // Output.
         ImGuiNET.ImGui.SetCursorPosX(ImGuiNET.ImGui.GetCursorPosX() + 20f * D);
         ImGuiNET.ImGui.BeginChild("##out", new Vector2(avail.X - 30f * D, avail.Y - inputH - gap - 10f * D),
-            ImGuiChildFlags.None, ImGuiWindowFlags.HorizontalScrollbar);
+            ImGuiChildFlags.None, ImGuiWindowFlags.HorizontalScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        SmoothScroll.Update();
 
         DrawLines(s);
 
@@ -257,7 +287,7 @@ internal static unsafe class ConsolePanel
         string? clipKeep = null;
         if (io.KeyCtrl && !io.KeyShift && !io.KeyAlt && ImGuiNET.ImGui.IsKeyPressed(ImGuiKey.C, false)
             && _selStart == _selEnd)
-            clipKeep = ImGuiNET.ImGui.GetClipboardText() ?? "";
+            clipKeep = Clipboard.Text;
         _cursor = _selStart = _selEnd = -1;
         var submitted = ImGuiNET.ImGui.InputText("##cmd", ref s.Input, InputMaxLen,
             ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.CallbackHistory |
@@ -266,7 +296,7 @@ internal static unsafe class ConsolePanel
             _inputCallback);
         io.ConfigInputTextEnterKeepActive = keepAfter;
         InputActive = ImGuiNET.ImGui.IsItemActive();
-        if (clipKeep is not null) ImGuiNET.ImGui.SetClipboardText(clipKeep);
+        if (clipKeep is not null) Clipboard.Set(clipKeep);
 
         if (submitted && !_enterAccepted)
         {
@@ -455,7 +485,9 @@ internal static unsafe class ConsolePanel
     {
         var visible = s.Visible;
         var clipper = new ImGuiListClipperPtr(ImGuiNative.ImGuiListClipper_ImGuiListClipper());
-        clipper.Begin(visible.Count);
+        // Explicit row step: ImGui truncates the cursor, so with a fractional font size (K != 1) rows
+        // are floor(line height + spacing) apart, and a measured first row above the window gives one more.
+        clipper.Begin(visible.Count, MathF.Floor(ImGuiNative.igGetTextLineHeightWithSpacing()));
         while (clipper.Step())
         {
             for (var i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
@@ -497,81 +529,11 @@ internal static unsafe class ConsolePanel
         clipper.Destroy();
     }
 
-    private static Vector4 ToneColor(Tone tone) => tone switch
-    {
-        Tone.Sub     => Theme.P.Sub,
-        Tone.Muted   => Theme.P.Muted,
-        Tone.Accent  => Theme.P.Accent,
-        Tone.Accent2 => Theme.P.Accent2,
-        Tone.Link    => Theme.P.Link,
-        Tone.Green   => Theme.P.Green,
-        Tone.Yellow  => Theme.P.Yellow,
-        Tone.Red     => Theme.P.Red,
-        _            => Theme.P.Fg,
-    };
-
-    /// <summary>
-    /// A row of coloured runs; tree rows get guide lines (├ └ │ drawn as hairlines) and, if they
-    /// have children, a ▾/▸ toggle (the whole row is clickable).
-    /// </summary>
     private static void DrawRichLine(ConsoleSession s, int index, ConsoleLine line)
     {
-        var dl    = ImGuiNET.ImGui.GetWindowDrawList();
-        var pos   = ImGuiNET.ImGui.GetCursorScreenPos();
-        var lineH = ImGuiNET.ImGui.GetTextLineHeight();
-        var rowH  = ImGuiNET.ImGui.GetTextLineHeightWithSpacing();
-        var cw    = ImGuiNET.ImGui.CalcTextSize("M").X;
-        var step  = cw * 2f;
-        var x0    = pos.X + PromptIndent();
-
-        if (line.Depth > 0)
-        {
-            var col   = Theme.ToU32(Theme.P.Sep);
-            var thick = 1f / UiScale.K;
-            float Gx(int level) => MathF.Round(x0 + level * step + cw * 0.5f);
-
-            for (var l = 0; l < Math.Min(line.Depth - 1, 32); l++)
-                if ((line.Guides & (1u << l)) != 0)
-                    dl.AddLine(new Vector2(Gx(l), pos.Y), new Vector2(Gx(l), pos.Y + rowH), col, thick);
-
-            var gx  = Gx(line.Depth - 1);
-            var mid = MathF.Round(pos.Y + lineH * 0.5f);
-            dl.AddLine(new Vector2(gx, pos.Y), new Vector2(gx, line.Last ? mid : pos.Y + rowH), col, thick);
-            dl.AddLine(new Vector2(gx, mid), new Vector2(gx + step - cw * 0.7f, mid), col, thick);
-        }
-
-        var x        = x0 + line.Depth * step;
-        var isNode   = line.Descendants > 0;
-        var textX    = isNode ? x + step : x;
-        var textW    = 0f;
-        foreach (var span in line.Spans!)
-            textW += ImGuiNET.ImGui.CalcTextSize(span.Text).X;
-
-        var hovered = false;
-        if (isNode)
-        {
-            ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x, pos.Y));
-            ImGuiNET.ImGui.PushID(line.Id);
-            if (ImGuiNET.ImGui.InvisibleButton("##node", new Vector2(textX - x + textW, lineH)))
-                s.Toggle(index);
-            hovered = ImGuiNET.ImGui.IsItemHovered();
-            ImGuiNET.ImGui.PopID();
-
-            dl.AddText(new Vector2(x, pos.Y), Theme.ToU32(hovered ? Theme.P.Fg : Theme.P.Muted),
-                line.Collapsed ? "▸" : "▾");
-        }
-
-        foreach (var span in line.Spans!)
-        {
-            var c = ToneColor(span.Tone);
-            if (hovered && span.Tone == Tone.Fg) c = Theme.P.Accent;
-            dl.AddText(new Vector2(textX, pos.Y), Theme.ToU32(c), span.Text);
-            textX += ImGuiNET.ImGui.CalcTextSize(span.Text).X;
-        }
-
-        // Reserve the row as one item so the clipper keeps a fixed row height.
-        ImGuiNET.ImGui.SetCursorScreenPos(pos);
-        ImGuiNET.ImGui.Dummy(new Vector2(MathF.Max(1f, textX - pos.X), lineH));
+        var x0 = ImGuiNET.ImGui.GetCursorScreenPos().X + PromptIndent();
+        if (TreeRows.Draw(line.Id, x0, line.Depth, line.Guides, line.Last, line.Descendants > 0, line.Collapsed, line.Spans!))
+            s.Toggle(index);
     }
 
     private static float PromptIndent()
@@ -603,6 +565,10 @@ internal static unsafe class ConsolePanel
         var descW  = matches.Max(m => ImGuiNET.ImGui.CalcTextSize(m.Description).X);
         var size   = new Vector2(MathF.Min(nameW + descW + padX * 2f, winSz.X - 20f * D), rowH * matches.Count);
         var min    = new Vector2(winPos.X + 4f * D, winPos.Y + winSz.Y - size.Y - 4f * D);
+        // Box on the framebuffer grid: the 1 px outline's straight runs then sit on one pixel row.
+        var boxMax = UiScale.Snap(min + size);
+        min  = UiScale.Snap(min);
+        size = boxMax - min;
         var r      = Theme.SmallRounding;
 
         dl.AddRectFilled(min, min + size, Theme.ToU32(Theme.P.Pop), r);
@@ -768,12 +734,12 @@ internal static unsafe class ConsolePanel
             if (Key(ImGuiKey.C))
             {
                 var text = BufferText(data);
-                ImGuiNET.ImGui.SetClipboardText(HasSelection(data) ? Selected(data) : text);
+                Clipboard.Set(HasSelection(data) ? Selected(data) : text);
                 return true;
             }
             if (Key(ImGuiKey.V))
             {
-                var clip = (ImGuiNET.ImGui.GetClipboardText() ?? "").Replace("\r", "").Replace('\n', ' ');
+                var clip = Clipboard.Text.Replace("\r", "").Replace('\n', ' ');
                 if (HasSelection(data)) DeleteSelection(data);
                 data.InsertChars(data.CursorPos, clip);
                 return true;

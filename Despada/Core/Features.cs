@@ -13,8 +13,8 @@ internal static partial class Features
 
     public static Feature? Find(string id) => _all.FirstOrDefault(f => f.Id == id);
 
-    // Built-in features, in Settings order. Empty until the first one lands (network log).
-    private static IEnumerable<Feature> BuiltIn() => [];
+    // Built-in features, in header-tab order.
+    private static IEnumerable<Feature> BuiltIn() => [new Modules.Net.NetFeature()];
 
     public static void Initialize()
     {

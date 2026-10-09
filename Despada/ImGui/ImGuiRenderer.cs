@@ -30,6 +30,9 @@ public static class ImGuiRenderer
     private const  int   StableFramesRequired = 30;
     
     public static volatile bool OverlayVisible = false;
+
+    /// <summary>How many times the overlay has been shown (panels drop their keyboard focus on a new one).</summary>
+    public static int Opened { get; private set; }
     private static bool _prevOverlayVisible = false;
 
     // True once the backend is dead for good; input hooks must stop capturing then.
@@ -62,6 +65,12 @@ public static class ImGuiRenderer
         {
             _prevOverlayVisible = OverlayVisible;
             SetCursorVisible(OverlayVisible);
+            // A resize while hidden was never counted as stable: rebuild on the first frame shown.
+            if (OverlayVisible)
+            {
+                _rebuildNow = true;
+                Opened++;
+            }
 
             // Losing focus makes ImGui release every held key/button, so nothing stays
             // "pressed" while the overlay is hidden and key-ups go to the game.
@@ -94,6 +103,9 @@ public static class ImGuiRenderer
         if (!needRender)
         {
             ImGuiInputHook.FlushEvents();
+            // Keep the frame clock running while nothing is drawn, so the first frame after opening
+            // gets a normal DeltaTime instead of the 0.1 s clamp (animations would jump a step).
+            _stopwatch.Restart();
             return;
         }
 
@@ -130,6 +142,9 @@ public static class ImGuiRenderer
             var io = ImGuiNET.ImGui.GetIO();
             io.DisplaySize             = new Vector2(_screenW / UiScale.K, _screenH / UiScale.K);
             io.DisplayFramebufferScale = new Vector2(UiScale.K, UiScale.K);
+            // Every frame, not only at atlas build: glyphs stay 1:1 with framebuffer pixels even while
+            // K drifts (window resizes) and the atlas hasn't been rebuilt for the new size yet.
+            io.FontGlobalScale         = 1f / UiScale.K;
             io.DeltaTime               = Math.Clamp(elapsedSec, 0.0001f, 0.1f);
 
             if (_configDirty)
@@ -150,8 +165,10 @@ public static class ImGuiRenderer
                 ImGuiInputHook.SnapshotWantCapture();
 
                 UpdateSdlTextInput(io.WantTextInput);
+                Clipboard.Tick(io.WantTextInput, _configClockTotal += elapsedSec);
 
-                WindowGuard.Draw("Toasts", () => DrawToasts(elapsedSec));
+                _toastDt = elapsedSec;
+                WindowGuard.Draw("Toasts", DrawToastsFrame);
 
                 if (OverlayVisible)
                     DrawUI();
@@ -159,7 +176,9 @@ public static class ImGuiRenderer
                 ImGuiNET.ImGui.Render();
                 // Blurs the area under the main window for this frame's backdrop (no-op if not requested).
                 GlassBlur.Run(_screenW, _screenH);
-                RenderDrawData(ImGuiNET.ImGui.GetDrawData());
+                var drawData = ImGuiNET.ImGui.GetDrawData();
+                SnapGlyphsToPixels(drawData);
+                RenderDrawData(drawData);
             }
             finally
             {
@@ -260,6 +279,9 @@ public static class ImGuiRenderer
         }
     }
 
+    private static float _toastDt;
+    private static void DrawToastsFrame() => DrawToasts(_toastDt);
+
     private static void DrawToasts(float dt)
     {
         while (_pendingToasts.TryDequeue(out var t))
@@ -330,6 +352,7 @@ public static class ImGuiRenderer
     private static float FontScale() => Math.Clamp(_screenH / 1080f, 0.75f, 4f);
 
     private static bool _configDirty;
+    private static double _configClockTotal;
     private static readonly System.Diagnostics.Stopwatch _configClock = System.Diagnostics.Stopwatch.StartNew();
 
     private static void ApplyTheme()
@@ -357,6 +380,7 @@ public static class ImGuiRenderer
             var io = ImGuiNET.ImGui.GetIO();
             ConfigureIO(io);
             WindowGuard.Initialize();
+            Clipboard.Install();
             io.DisplaySize             = new Vector2(_screenW / UiScale.K, _screenH / UiScale.K);
             io.DisplayFramebufferScale = new Vector2(UiScale.K, UiScale.K);
 
@@ -403,6 +427,15 @@ public static class ImGuiRenderer
     
     private static float _atlasBuiltScale = -1f;
 
+    // Body and wordmark pixel sizes: the atlas is rasterised at exactly these (physical) sizes.
+    private static float BodyPx(float scale) => MathF.Floor(16f * scale);
+    private static float CapsPx(float scale) => MathF.Floor(14f * scale);
+
+    // Frames the framebuffer size must hold still before a resize rebuilds the atlas (niri animates
+    // window resizes over many frames; one rebuild at the end is enough).
+    private const int RebuildStableFrames = 10;
+    private static bool _rebuildNow;
+
     private static void BuildFontAtlas(ImGuiIOPtr io, float scale)
     {
         WordmarkFont = 0;
@@ -434,15 +467,20 @@ public static class ImGuiRenderer
         if (_atlasBuiltScale <= 0f) return;
         float scale = FontScale();
 
-        // Resolution changes only; small drift is absorbed by FontGlobalScale.
-        if (MathF.Abs(scale - _atlasBuiltScale) / _atlasBuiltScale >= 0.1f)
+        // FontGlobalScale = 1/K keeps glyphs at their rasterised pixel size whatever K is, so only the
+        // text-to-layout proportion drifts after a resize. Rebuild as soon as a whole pixel size changes
+        // (the old 10 % threshold kept e.g. 22 px text inside a 23 px layout after going fullscreen).
+        var now = _rebuildNow;
+        _rebuildNow = false;
+        if ((BodyPx(scale) != BodyPx(_atlasBuiltScale) || CapsPx(scale) != CapsPx(_atlasBuiltScale))
+            && (now || _stableFrames >= RebuildStableFrames))
             BuildFontAtlas(io, scale);
     }
 
     private static unsafe void LoadFont(ImGuiIOPtr io, float scale)
     {
         const string resourceName = "Despada.Assets.JetBrainsMonoNerdFontMono-Regular.ttf";
-        var fontSize = MathF.Floor(16f * scale);
+        var fontSize = BodyPx(scale);
 
         var asm = Assembly.GetExecutingAssembly();
         using var stream = asm.GetManifestResourceStream(resourceName);
@@ -463,7 +501,10 @@ public static class ImGuiRenderer
 
         var cfg = new ImFontConfigPtr(ImGuiNative.ImFontConfig_ImFontConfig());
         cfg.FontDataOwnedByAtlas = false;
-        cfg.OversampleH          = 2;
+        // No oversampling: glyphs are drawn 1:1 and snapped to whole framebuffer pixels
+        // (SnapGlyphsToPixels), so one texel = one pixel. 2x horizontal oversampling only bought
+        // sub-pixel placement, which PixelSnapH already throws away, and shifted every glyph by 1/4 px.
+        cfg.OversampleH          = 1;
         cfg.OversampleV          = 1;
         cfg.PixelSnapH           = true;
 
@@ -510,12 +551,12 @@ public static class ImGuiRenderer
 
         var cfg = new ImFontConfigPtr(ImGuiNative.ImFontConfig_ImFontConfig());
         cfg.FontDataOwnedByAtlas = false;
-        cfg.OversampleH          = 2;
+        cfg.OversampleH          = 1; // see LoadFont
         cfg.OversampleV          = 1;
         cfg.PixelSnapH           = true;
 
         var font = io.Fonts.AddFontFromMemoryTTF(_capsDataHandle.AddrOfPinnedObject(), data.Length,
-            MathF.Floor(14f * scale), cfg, _capsRangesHandle.AddrOfPinnedObject());
+            CapsPx(scale), cfg, _capsRangesHandle.AddrOfPinnedObject());
         ImGuiNative.ImFontConfig_destroy(cfg.NativePtr);
         WordmarkFont = (nint)font.NativePtr;
     }
@@ -528,6 +569,7 @@ public static class ImGuiRenderer
         0x20A0, 0x20CF, // Currency: ₽ €
         0x2100, 0x214F, // Letterlike: № ™
         0x2190, 0x21FF, // Arrows
+        0x2300, 0x23FF, // Misc Technical: ⏎
         0x2500, 0x259F, // Box Drawing + Block Elements
         0x25A0, 0x25FF, // Geometric Shapes
         0x2600, 0x26FF, // Misc Symbols: ⚠
@@ -580,14 +622,88 @@ public static class ImGuiRenderer
 
     private static nint CreateFontTexture(nint pixels, int width, int height)
     {
+        const uint GL_TEXTURE_2D = 0x0DE1;
         var tex = GlBackend.GenTexture();
-        GlBackend.BindTexture(0x0DE1, tex);
-        GlBackend.TexParameteri(0x0DE1, 0x2801, 0x2600);
-        GlBackend.TexParameteri(0x0DE1, 0x2800, 0x2600);
+        GlBackend.BindTexture(GL_TEXTURE_2D, tex);
+        // LINEAR: 1:1 glyphs are snapped so every pixel centre hits a texel centre, where LINEAR and
+        // NEAREST return the same texel; anything drawn scaled (other font sizes, Image) is then
+        // filtered instead of dropping/duplicating texel columns as NEAREST did.
+        GlBackend.TexParameteri(GL_TEXTURE_2D, 0x2801 /*MIN_FILTER*/, 0x2601 /*LINEAR*/);
+        GlBackend.TexParameteri(GL_TEXTURE_2D, 0x2800 /*MAG_FILTER*/, 0x2601 /*LINEAR*/);
+        GlBackend.TexParameteri(GL_TEXTURE_2D, 0x2802 /*WRAP_S*/, 0x812F /*CLAMP_TO_EDGE*/);
+        GlBackend.TexParameteri(GL_TEXTURE_2D, 0x2803 /*WRAP_T*/, 0x812F /*CLAMP_TO_EDGE*/);
         GlBackend.TexImage2D(width, height, pixels);
         GlBackend.BindTexture(0x0DE1, 0);
         return (nint)tex;
     }
+
+    private static readonly float[] _proj = new float[16]; // reused: no per-frame allocation
+
+    /// <summary>
+    /// Moves every glyph quad that is drawn 1:1 (one atlas texel per framebuffer pixel) onto the
+    /// framebuffer pixel grid. ImGui only truncates text positions in logical units; with K ≠ 1
+    /// (e.g. K = 0.933 for a 2520x1493 window) a logical integer lands on a fractional physical
+    /// pixel, so each glyph sat at its own sub-pixel phase. The whole quad moves by one offset
+    /// (never the corners separately), so a glyph is never stretched; text drawn at another size,
+    /// images of other textures and untextured geometry don't match the 1:1 pattern and are left alone.
+    /// </summary>
+    private static unsafe void SnapGlyphsToPixels(ImDrawDataPtr drawData)
+    {
+        var fonts = ImGuiNET.ImGui.GetIO().Fonts;
+        float texW = fonts.TexWidth, texH = fonts.TexHeight;
+        var kx = drawData.FramebufferScale.X;
+        var ky = drawData.FramebufferScale.Y;
+        if (texW <= 0f || texH <= 0f || kx <= 0f || ky <= 0f) return;
+        var ox = drawData.DisplayPos.X;
+        var oy = drawData.DisplayPos.Y;
+
+        for (var n = 0; n < drawData.CmdListsCount; n++)
+        {
+            var list = drawData.CmdLists[n];
+            var v    = (ImDrawVert*)list.VtxBuffer.Data;
+            var len  = list.VtxBuffer.Size;
+            var i    = 0;
+            float prx = 0f, pry = 0f; // the previous glyph's correction, in pixels
+            while (i + 3 < len)
+            {
+                // ImFont::RenderText / PrimRectUV order: (x0,y0) (x1,y0) (x1,y1) (x0,y1), same for UVs.
+                ImDrawVert* a = v + i, b = a + 1, c = a + 2, d = a + 3;
+                if (a->pos.Y == b->pos.Y && b->pos.X == c->pos.X && c->pos.Y == d->pos.Y && d->pos.X == a->pos.X
+                 && a->uv.Y  == b->uv.Y  && b->uv.X  == c->uv.X  && c->uv.Y  == d->uv.Y  && d->uv.X  == a->uv.X)
+                {
+                    var wTex = (c->uv.X - a->uv.X) * texW;
+                    var hTex = (c->uv.Y - a->uv.Y) * texH;
+                    var wPx  = (c->pos.X - a->pos.X) * kx;
+                    var hPx  = (c->pos.Y - a->pos.Y) * ky;
+                    if (wTex > 0f && hTex > 0f && MathF.Abs(wPx - wTex) < 0.02f && MathF.Abs(hPx - hTex) < 0.02f)
+                    {
+                        // Align the texel grid with the pixel grid (equals rounding the quad's corner for
+                        // whole glyphs; also right for glyphs ImGui clipped mid-texel).
+                        var gx = (a->pos.X - ox) * kx - a->uv.X * texW;
+                        var gy = (a->pos.Y - oy) * ky - a->uv.Y * texH;
+                        // Glyphs of a line share one sub-pixel phase. At a phase of ~0.5 rounding each
+                        // on its own lets float noise send neighbours opposite ways (1 px jumps inside
+                        // a word), so the previous glyph's correction is kept when it still lands on the grid.
+                        // A fresh decision quantises first and rounds halves up, so the noise can't
+                        // split a run whose phase is exactly .5.
+                        var rx = MathF.Abs(MathF.Round(gx + prx) - (gx + prx)) < 0.01f ? MathF.Round(gx + prx) - gx : RoundHalfUp(gx) - gx;
+                        var ry = MathF.Abs(MathF.Round(gy + pry) - (gy + pry)) < 0.01f ? MathF.Round(gy + pry) - gy : RoundHalfUp(gy) - gy;
+                        prx = rx;
+                        pry = ry;
+                        var dx = rx / kx;
+                        var dy = ry / ky;
+                        a->pos.X += dx; b->pos.X += dx; c->pos.X += dx; d->pos.X += dx;
+                        a->pos.Y += dy; b->pos.Y += dy; c->pos.Y += dy; d->pos.Y += dy;
+                        i += 4;
+                        continue;
+                    }
+                }
+                i++;
+            }
+        }
+    }
+
+    private static float RoundHalfUp(float v) => MathF.Floor(MathF.Round(v * 256f) / 256f + 0.5f);
 
     private static unsafe void RenderDrawData(ImDrawDataPtr drawData)
     {
@@ -598,8 +714,20 @@ public static class ImGuiRenderer
         if (fbWidth <= 0 || fbHeight <= 0) return;
 
         // Clyde leaves scissor disabled after its UI pass; without this every clip rect is ignored.
-        // GlStateGuard.Restore() puts it back the way Clyde had it.
+        // GlStateGuard.Restore() puts it back (and the blend/depth/cull/stencil state below) the way
+        // Clyde had it.
         GlBackend.Enable(0x0C11 /*GL_SCISSOR_TEST*/);
+
+        // ImGui's colours are straight (not premultiplied) alpha. Set the blend mode explicitly rather
+        // than inheriting whatever the last Clyde pass used: a premultiplied or additive leftover would
+        // put bright halos around every glyph and AA edge.
+        GlBackend.Enable(0x0BE2 /*GL_BLEND*/);
+        GlBackend.BlendEquation(0x8006 /*GL_FUNC_ADD*/);
+        GlBackend.BlendFuncSeparate(0x0302 /*SRC_ALPHA*/, 0x0303 /*ONE_MINUS_SRC_ALPHA*/,
+                                    1 /*ONE*/,            0x0303 /*ONE_MINUS_SRC_ALPHA*/);
+        GlBackend.Disable(0x0B44 /*GL_CULL_FACE*/);
+        GlBackend.Disable(0x0B71 /*GL_DEPTH_TEST*/);
+        GlBackend.Disable(0x0B90 /*GL_STENCIL_TEST*/);
 
         GlBackend.UseProgram(_shader);
         GlBackend.Uniform1i(_uniformTex, 0);
@@ -608,13 +736,13 @@ public static class ImGuiRenderer
         float R = drawData.DisplayPos.X + drawData.DisplaySize.X;
         float T = drawData.DisplayPos.Y;
         float B = drawData.DisplayPos.Y + drawData.DisplaySize.Y;
-        float[] proj =
-        [
-             2f/(R-L),     0,          0, 0,
-             0,            2f/(T-B),   0, 0,
-             0,            0,         -1, 0,
-            (R+L)/(L-R), (T+B)/(B-T), 0, 1,
-        ];
+        var proj = _proj;
+        proj[0]  = 2f / (R - L);
+        proj[5]  = 2f / (T - B);
+        proj[10] = -1f;
+        proj[12] = (R + L) / (L - R);
+        proj[13] = (T + B) / (B - T);
+        proj[15] = 1f;
         GlBackend.UniformMatrix4fv(_uniformProjMtx, proj);
 
         GlBackend.BindVertexArray(_vao);

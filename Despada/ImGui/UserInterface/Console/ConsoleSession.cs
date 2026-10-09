@@ -97,6 +97,8 @@ internal sealed class ConsoleSession(int number)
 
     public string Input = "";
     public bool ScrollToBottom;
+    /// <summary>Output arrived since the session was last shown (a dot on its tab).</summary>
+    public bool Unread;
 
     public void Print(LineKind kind, string text)
     {
@@ -149,6 +151,7 @@ internal sealed class ConsoleSession(int number)
         }
         _visibleDirty = true;
         ScrollToBottom = true;
+        Unread = true;
     }
 
     public void Submit(string line)

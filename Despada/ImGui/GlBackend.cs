@@ -36,6 +36,9 @@ internal static unsafe class GlBackend
     private delegate void D_Scissor(int x, int y, int width, int height);
     private delegate void D_DrawElementsBaseVertex(uint mode, int count, uint type, nint indices, int baseVertex);
     private delegate void D_Enable(uint cap);
+    private delegate void D_Disable(uint cap);
+    private delegate void D_BlendEquation(uint mode);
+    private delegate void D_BlendFuncSeparate(uint srcRgb, uint dstRgb, uint srcAlpha, uint dstAlpha);
     private delegate void D_DrawElements(uint mode, int count, uint type, nint indices);
     private delegate byte* D_GetString(uint name);
     private delegate void D_GetShaderiv(uint shader, uint pname, out int param);
@@ -72,6 +75,9 @@ internal static unsafe class GlBackend
     private static D_DrawElements           glDrawElements           = null!;
     private static D_GetString              glGetString              = null!;
     private static D_Enable                 glEnable                 = null!;
+    private static D_Disable                glDisable                = null!;
+    private static D_BlendEquation          glBlendEquation          = null!;
+    private static D_BlendFuncSeparate      glBlendFuncSeparate      = null!;
     private static D_GetShaderiv            glGetShaderiv            = null!;
     private static D_GetProgramiv           glGetProgramiv           = null!;
     private static D_GetInfoLog             glGetShaderInfoLog       = null!;
@@ -115,6 +121,9 @@ internal static unsafe class GlBackend
         glDrawElements            = GlLoader.Load<D_DrawElements>("glDrawElements");
         glGetString               = GlLoader.Load<D_GetString>("glGetString");
         glEnable                  = GlLoader.Load<D_Enable>("glEnable");
+        glDisable                 = GlLoader.Load<D_Disable>("glDisable");
+        glBlendEquation           = GlLoader.Load<D_BlendEquation>("glBlendEquation");
+        glBlendFuncSeparate       = GlLoader.Load<D_BlendFuncSeparate>("glBlendFuncSeparate");
         glGetShaderiv             = GlLoader.Load<D_GetShaderiv>("glGetShaderiv");
         glGetProgramiv            = GlLoader.Load<D_GetProgramiv>("glGetProgramiv");
         glGetShaderInfoLog        = GlLoader.Load<D_GetInfoLog>("glGetShaderInfoLog");
@@ -181,6 +190,9 @@ internal static unsafe class GlBackend
     public static void EnableVertexAttribArray(uint idx)   => glEnableVertexAttribArray(idx);
     public static void Scissor(int x, int y, int w, int h) => glScissor(x, y, w, h);
     public static void Enable(uint cap)                    => glEnable(cap);
+    public static void Disable(uint cap)                   => glDisable(cap);
+    public static void BlendEquation(uint mode)            => glBlendEquation(mode);
+    public static void BlendFuncSeparate(uint sRgb, uint dRgb, uint sA, uint dA) => glBlendFuncSeparate(sRgb, dRgb, sA, dA);
 
     public static void VertexAttribPointer(uint idx, int size, uint type, bool norm, int stride, int offset)
         => glVertexAttribPointer(idx, size, type, norm, stride, (nint)offset);

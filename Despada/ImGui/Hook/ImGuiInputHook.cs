@@ -21,6 +21,23 @@ public static class ImGuiInputHook
 
     public static volatile bool WantCaptureMouse = false;
     public static volatile bool WantCaptureKeyboard = false;
+    /// <summary>An ImGui text field has focus (WantCaptureKeyboard also counts a panel's claim).</summary>
+    public static volatile bool WantTextInput = false;
+
+    // A panel that works the keyboard without a text field (the network list with its hotkeys)
+    // claims it for every frame it is focused; the claim applies from the next frame on.
+    private static bool _claimNext;
+    private static bool _claimed;
+
+    /// <summary>
+    /// Keeps keys from the game, as an active text field does: right away (the next input batch,
+    /// which runs before the next render) and as long as it is claimed every frame.
+    /// </summary>
+    public static void ClaimKeyboard()
+    {
+        _claimNext = true;
+        if (ImGuiRenderer.OverlayVisible) WantCaptureKeyboard = true;
+    }
 
     public static void FlushEvents()
     {
@@ -38,16 +55,21 @@ public static class ImGuiInputHook
     {
         while (_ioQueue.TryDequeue(out _)) { }
         _gameHeld.Clear();
+        _claimNext = _claimed = false;
         WantCaptureMouse    = false;
         WantCaptureKeyboard = false;
+        WantTextInput       = false;
     }
 
     public static void SnapshotWantCapture()
     {
+        _claimed   = _claimNext && ImGuiRenderer.OverlayVisible;
+        _claimNext = false;
         if (!ImGuiRenderer.OverlayVisible)
         {
             WantCaptureMouse = false;
             WantCaptureKeyboard = false;
+            WantTextInput = false;
             return;
         }
         var io = ImGuiNET.ImGui.GetIO();
@@ -55,7 +77,8 @@ public static class ImGuiInputHook
         // io.WantCaptureKeyboard is also true while any item is active (dragging a window,
         // holding a slider...), which would freeze the game's keyboard. Only an active text
         // field really owns the keyboard; ImGui still receives every key either way.
-        WantCaptureKeyboard = io.WantTextInput;
+        WantTextInput       = io.WantTextInput;
+        WantCaptureKeyboard = io.WantTextInput || _claimed;
     }
 
     /// <summary>One prefix on every input entry point; a missing one only loses that kind of input.</summary>
@@ -204,8 +227,13 @@ public static class ImGuiInputHook
 
         var imKey = KeyMap.IsMouseKey(key) ? ImGuiKey.None : KeyMap.ToImGuiKey(key);
 
-        // Alt+key console chords (session keys, Alt+B/F/D): the character must not be typed too.
-        if (ConsolePanel.InputActive && IsAltChordKey(imKey)
+        // A paste is coming (Ctrl+V / Ctrl+Shift+V): fetch the system clipboard now.
+        if (imKey == ImGuiKey.LeftCtrl && WantTextInput) Clipboard.Refresh();
+
+        // Alt+key chords (session/tab keys, Alt+B/F/D): the character must not be typed too, in the
+        // console or any other field that owns the keyboard.
+        // AltGr (291: KeyEventArgs.AltGr; null on older engines) types characters on many layouts.
+        if (WantCaptureKeyboard && IsAltChordKey(imKey) && Read(args, "AltGr") is not true
             && Convert.ToBoolean(Read(args, "Alt") ?? false) && !Convert.ToBoolean(Read(args, "Control") ?? false))
             _suppressText = true;
 
@@ -384,7 +412,8 @@ public static class ImGuiSdl3TextInputStopPatch
 
     private static bool Prefix()
     {
-        if (ImGuiRenderer.OverlayVisible && ImGuiInputHook.WantCaptureKeyboard)
+        // Only for a real text field: a panel's keyboard claim needs no SDL text input.
+        if (ImGuiRenderer.OverlayVisible && ImGuiInputHook.WantTextInput)
         {
             if (!_loggedBlock)
             {

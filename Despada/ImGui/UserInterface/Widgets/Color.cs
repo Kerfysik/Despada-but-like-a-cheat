@@ -508,7 +508,7 @@ public static partial class Widgets
         ImGuiNET.ImGui.SameLine();
 
         if (ImGuiNET.ImGui.Button($"Copy##{label}_hex_copy"))
-            ImGuiNET.ImGui.SetClipboardText(ColorToHex(color, includeAlpha: true));
+            Clipboard.Set(ColorToHex(color, includeAlpha: true));
     }
 
     private static void DrawColorPreview(ImDrawListPtr dl, Vector2 min, Vector2 max, Vector4 color, float rgbMul, float rounding)
