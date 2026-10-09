@@ -16,7 +16,39 @@ internal static class NetCommands
         new("net.clear", "net.clear", "drop all captured packets", (s, _) => { NetCapture.Clear(); s.Print(LineKind.Muted, "network log cleared"); }),
         new("net.pause", "net.pause [on|off]", "stop or resume capturing", Pause),
         new("net.buffer", "net.buffer [packets]", "show or set how many packets are kept", (s, a) => Buffer(f, s, a)),
+        new("net.types", "net.types [text]", "every message, event and BUI type the game can send", Types),
     ];
+
+    private static void Types(ConsoleSession s, string[] args)
+    {
+        var text  = string.Join(' ', args);
+        var types = NetTypes.All;
+        if (types.Count == 0)
+        {
+            s.Print(LineKind.Muted, NetTypes.Failed ? "reading the types failed (see the log)" : "types are still being read, try again in a moment");
+            return;
+        }
+        var all = types.Where(t => t.Name.Contains(text, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (all.Count == 0)
+        {
+            s.Print(LineKind.Muted, $"no types match '{text}'");
+            return;
+        }
+        // Without a filter only the counts: thousands of lines would push the history out.
+        const int MaxShown = 200;
+        var t = new ConsoleTree();
+        foreach (var (kind, caption) in new[] { (NetTypes.Kind.Message, "messages"), (NetTypes.Kind.Event, "events"), (NetTypes.Kind.Bui, "BUI messages") })
+        {
+            var group = all.Where(x => x.Kind == kind).ToList();
+            if (group.Count == 0) continue;
+            var node = t.Add([new Span(caption, Tone.Accent), new Span($"  {group.Count}", Tone.Muted)]);
+            if (text.Length == 0) continue;
+            foreach (var x in group.Take(MaxShown)) node.Add([new Span(x.Name)]);
+            if (group.Count > MaxShown) node.Add([new Span($"… {group.Count - MaxShown} more", Tone.Muted)]);
+        }
+        s.Print(t);
+        s.Print(new Span($"{all.Count} of {NetTypes.All.Count}", Tone.Muted));
+    }
 
     private static void Find(ConsoleSession s, string[] args)
     {

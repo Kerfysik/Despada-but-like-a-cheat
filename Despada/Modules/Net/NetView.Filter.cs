@@ -11,16 +11,10 @@ using ImGuiNET;
 
 namespace Despada.Modules.Net;
 
-// The filter bar: the word being typed (completions below it) and, flush with the bar's right end,
-// a "N filters ▾" button whose panel lists the committed tokens by kind (click one to negate it,
-// × to drop it) plus the presets. Space or Enter commits the typed word, Tab takes the highlighted
-// completion, ↑/↓ pick one, Backspace on an empty field takes the last token back, Esc clears.
 internal static unsafe partial class NetView
 {
     private static readonly List<NetQuery.Token> _chips = new();
 
-    // A token field's state: the bar's field, and the search field in the filters panel. One
-    // callback serves both (_cb is the one being drawn).
     private sealed class TokenBox
     {
         public string Text = "";
@@ -102,7 +96,7 @@ internal static unsafe partial class NetView
         // The outline last, over the button's fill, so it stays one unbroken line around both.
         dl.AddRect(boxMin, boxMax, Theme.ToU32(Theme.P.Sep), r, ImDrawFlags.None, 1f / UiScale.K);
 
-        // The text field fills the rest of the bar, frameless.
+        // The text field fills the rest with the bar, frameless.
         ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x, pos.Y));
         ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBg, Vector4.Zero);
         ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, Vector4.Zero);
@@ -129,7 +123,7 @@ internal static unsafe partial class NetView
         var word = CurrentWord(_bar.Text);
         if (_bar.ReplaceWith is null)
             _bar.Sug = _filterActive && (word.Length > 0 || _chips.Count == 0)
-                ? NetQuery.Suggest(word, _knownTypes.OrderBy(t => t), KnownEntities(word)).Take(10).ToList()
+                ? NetQuery.Suggest(word, TypeSource(), KnownEntities(word)).Take(10).ToList()
                 : [];
         if (_bar.Sug.Count == 1 && _bar.Sug[0].Insert == word) _bar.Sug.Clear();
         _bar.SugIndex = Math.Clamp(_bar.SugIndex, 0, Math.Max(0, _bar.Sug.Count - 1));
@@ -212,7 +206,7 @@ internal static unsafe partial class NetView
         // From the text alone (not "while active"): a click on a suggestion deactivates the field first.
         if (_panel.ReplaceWith is null)
             _panel.Sug = pword.Length > 0
-                ? NetQuery.Suggest(pword, _knownTypes.OrderBy(t => t), KnownEntities(pword)).Take(8).ToList()
+                ? NetQuery.Suggest(pword, TypeSource(), KnownEntities(pword)).Take(8).ToList()
                 : [];
         if (_panel.Sug.Count == 1 && _panel.Sug[0].Insert == pword) _panel.Sug.Clear();
         _panel.SugIndex = Math.Clamp(_panel.SugIndex, 0, Math.Max(0, _panel.Sug.Count - 1));
@@ -314,6 +308,25 @@ internal static unsafe partial class NetView
         if (!at) return null;
         var prefix = NetQuery.Presets.Where(p => p.Name.StartsWith(body, StringComparison.OrdinalIgnoreCase)).ToList();
         return prefix.Count == 1 ? (prefix[0].Name, negated) : null;
+    }
+
+    // Types seen in the capture first, then every other wire type the game defines; rebuilt only
+    // when either list changes.
+    private static string[] _typeSource = [];
+    private static int _typeSourceSeen = -1;
+    private static IReadOnlyList<string>? _typeSourceAll;
+
+    private static IEnumerable<string> TypeSource()
+    {
+        var all = NetTypes.Names;
+        if (_knownTypes.Count != _typeSourceSeen || !ReferenceEquals(all, _typeSourceAll))
+        {
+            _typeSourceSeen = _knownTypes.Count;
+            _typeSourceAll  = all;
+            _typeSource = _knownTypes.OrderBy(t => t, StringComparer.Ordinal)
+                .Concat(all.Where(n => !_knownTypes.Contains(n))).ToArray();
+        }
+        return _typeSource;
     }
 
     private static void PanelCaption(string text)

@@ -323,4 +323,17 @@ public class NetDecodeTests
         Assert.Equal(["a", "b"], NetDecode.StringLines("a\r\nb"));
         Assert.Equal(2, NetDecode.StringLines(new string('x', 200)).Count);   // a long line in pieces
     }
+
+    [Fact]
+    public void WireTypesAreFoundByReflection()
+    {
+        var found = NetTypes.Scan([typeof(NetDecodeTests).Assembly], typeof(FakeNetMessage)).ToDictionary(x => x.Name, x => x.Kind);
+        Assert.Equal(NetTypes.Kind.Message, found["MsgFakePing"]);
+        Assert.Equal(NetTypes.Kind.Event, found["FakeInteractEvent"]);
+        Assert.Equal(NetTypes.Kind.Bui, found["BUI.FakeStorageMessage"]);
+        Assert.False(found.ContainsKey("LocalOnlyEvent"));
+        Assert.False(found.ContainsKey("FakeStorageMessage"));   // a BUI message is not listed as an event
+        Assert.False(found.ContainsKey("FakeWrapMessage"));      // only carries one
+        Assert.False(found.ContainsKey("FakeNetMessage"));   // abstract
+    }
 }
