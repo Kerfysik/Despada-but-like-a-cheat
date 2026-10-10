@@ -6,9 +6,33 @@ namespace Despada.Modules.Net;
 
 internal enum NetDir : byte { In, Out }
 
+/// <summary>What the active side did with a packet; drawn as a badge on its row.</summary>
+internal enum PacketMark
+{
+    None,
+    /// <summary>A rule stopped it (or it was dropped from the frozen queue).</summary>
+    Blocked,
+    /// <summary>Waiting in <see cref="NetActive.Frozen"/>.</summary>
+    Frozen,
+    /// <summary>A rule made copies of it (<see cref="Packet.MarkCount"/> of them).</summary>
+    Duplicated,
+    /// <summary>One of those copies.</summary>
+    Copy,
+    /// <summary>Changed by a rule or in the editor before it went on.</summary>
+    Edited,
+    /// <summary>Made and sent from the overlay.</summary>
+    Custom,
+}
+
 /// <summary>One captured message. Written once by the capture hook, read by the UI/console.</summary>
 internal sealed class Packet
 {
+    /// <summary>What the active side did with it (set by NetActive's implementation).</summary>
+    public PacketMark Mark;
+    public int MarkCount;
+    /// <summary>Sent or delivered by us (a resend, a draft, a rule's copy): rules leave it alone.</summary>
+    public bool Ours;
+
     /// <summary>Running number, shown as #4512.</summary>
     public long   Seq;
     /// <summary>Stopwatch timestamp at capture.</summary>
@@ -34,8 +58,12 @@ internal sealed class Packet
     /// <summary>The message object; dropped for older packets to keep memory bounded.</summary>
     public object? Message;
 
-    /// <summary>Open in the inspector: the message and bytes are not dropped (NetCapture.Pin).</summary>
-    public bool Pinned;
+    /// <summary>
+    /// Holders that need the message and bytes kept (an inspector tab, the frozen queue), counted:
+    /// NetCapture.Pin / Unpin. One holder letting go must not drop what another still shows.
+    /// </summary>
+    public int Pins;
+    public bool Pinned => Pins > 0;
     /// <summary>Passed by the retention queues while pinned; dropped on Unpin.</summary>
     public bool Untracked;
 

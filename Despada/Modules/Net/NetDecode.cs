@@ -18,6 +18,10 @@ internal sealed class FieldNode(string name, object? value, int depth)
     public object? Value { get; } = value;
     public int     Depth { get; } = depth;
     public Span[]  Text  { get; set; } = [];
+    /// <summary>The value's part of <see cref="Text"/> (the inspector's table draws name and value apart).</summary>
+    public Span[]  ValueText { get; set; } = [];
+    /// <summary>The declared type of the field (the item type for a sequence item), for the table's type column.</summary>
+    public string? TypeName  { get; set; }
     public bool    CanExpand { get; set; }
     public bool    Expanded  { get; set; }
     public List<FieldNode>? Children { get; set; }
@@ -253,14 +257,14 @@ internal static class NetDecode
                                 { Text = [new Span($"… {Count(node.Value) - PageSize} more", Tone.Muted)] });
                             break;
                         }
-                        list.Add(Child($"[{i}]", item, node.Depth + 1));
+                        list.Add(Child($"[{i}]", item, node.Depth + 1, type: ItemType(node.Value.GetType())));
                         i++;
                     }
                 }
                 else
                 {
                     foreach (var f in Fields(node.Value.GetType()))
-                        list.Add(Child(DisplayName(f), SafeGet(f, node.Value, out var err), node.Depth + 1, err));
+                        list.Add(Child(DisplayName(f), SafeGet(f, node.Value, out var err), node.Depth + 1, err, f.FieldType));
                 }
             }
         }
@@ -272,12 +276,36 @@ internal static class NetDecode
         return list;
     }
 
-    private static FieldNode Child(string name, object? value, int depth, string? error = null)
+    private static FieldNode Child(string name, object? value, int depth, string? error = null, Type? type = null)
     {
-        var n = new FieldNode(name, value, depth);
-        if (error is not null) n.Text = [new Span(PadName(name), Tone.Muted), new Span("⚠ " + OneLine(error), Tone.Red)];
-        else                   Describe(n);
+        var n = new FieldNode(name, value, depth) { TypeName = TypeLabel(type ?? value?.GetType()) };
+        if (error is not null)
+        {
+            n.ValueText = [new Span("⚠ " + OneLine(error), Tone.Red)];
+            n.Text = [new Span(PadName(name), Tone.Muted), .. n.ValueText];
+        }
+        else Describe(n);
         return n;
+    }
+
+    /// <summary>A type as the table's type column shows it: "float", "NetEntity?", "List&lt;int&gt;".</summary>
+    internal static string? TypeLabel(Type? t)
+    {
+        if (t is null) return null;
+        if (Nullable.GetUnderlyingType(t) is { } u) return TypeLabel(u) + "?";
+        if (t == typeof(int)) return "int";
+        if (t == typeof(uint)) return "uint";
+        if (t == typeof(float)) return "float";
+        if (t == typeof(double)) return "double";
+        if (t == typeof(bool)) return "bool";
+        if (t == typeof(string)) return "string";
+        if (t == typeof(byte)) return "byte";
+        if (t == typeof(long)) return "long";
+        if (t == typeof(ulong)) return "ulong";
+        if (t == typeof(short)) return "short";
+        if (t == typeof(ushort)) return "ushort";
+        if (t == typeof(object)) return "object";
+        return FriendlyName(t);
     }
 
     private static string PadName(string name) => name.PadRight(Math.Max(14, name.Length + 2));
@@ -287,6 +315,7 @@ internal static class NetDecode
     {
         var name = n.Depth == 0 ? [] : new[] { new Span(PadName(n.Name), Tone.Muted) };
         var (value, expand) = Format(n.Value);
+        n.ValueText = value;
         n.Text = [.. name, .. value];
         n.CanExpand = expand;
     }
@@ -388,6 +417,18 @@ internal static class NetDecode
 
     // Instance fields of the type and its bases, public and not; auto-property backing fields
     // show under the property's name.
+    internal static FieldInfo[] FieldsOf(Type t) => Fields(t);
+
+    /// <summary>A field's value, or null when reading it throws (the drafts need no error text).</summary>
+    internal static object? SafeRead(FieldInfo f, object o) => SafeGet(f, o, out _);
+
+    /// <summary>A value as the field tree shows it, in one line (for read-only draft fields).</summary>
+    internal static string Brief(object? v)
+    {
+        try { return OneLine(string.Concat(Format(v).Text.Select(s => s.Text))); }
+        catch (Exception ex) { return $"⚠ {ex.GetType().Name}"; }
+    }
+
     private static FieldInfo[] Fields(Type t) => _fields.GetOrAdd(t, static t =>
     {
         const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
@@ -397,7 +438,7 @@ internal static class NetDecode
         return list.ToArray();
     });
 
-    private static string DisplayName(FieldInfo f)
+    internal static string DisplayName(FieldInfo f)
         => f.Name.StartsWith('<') && f.Name.IndexOf('>') is > 1 and var end ? f.Name[1..end] : f.Name;
 
     private static object? SafeGet(FieldInfo f, object o, out string? error)
@@ -444,11 +485,19 @@ internal static class NetDecode
 
     private static string Fmt(object? v) => v is IFormattable f ? f.ToString("0.##", CultureInfo.InvariantCulture) : v?.ToString() ?? "?";
 
-    private static string FriendlyName(Type t)
+    private static Type? ItemType(Type seq)
+    {
+        if (seq.IsArray) return seq.GetElementType();
+        var e = seq.GetInterfaces().FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
+        return e?.GetGenericArguments()[0];
+    }
+
+    internal static string FriendlyName(Type t)
     {
         if (!t.IsGenericType) return t.Name;
-        var name = t.Name[..t.Name.IndexOf('`')];
-        return $"{name}<{string.Join(", ", t.GetGenericArguments().Select(FriendlyName))}>";
+        var tick = t.Name.IndexOf('`');
+        var name = tick < 0 ? t.Name : t.Name[..tick];
+        return $"{name}<{string.Join(", ", t.GetGenericArguments().Select(a => TypeLabel(a)))}>";
     }
 
     private static string Hex(byte[] bytes, int max)

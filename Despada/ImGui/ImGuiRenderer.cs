@@ -569,6 +569,7 @@ public static class ImGuiRenderer
         0x20A0, 0x20CF, // Currency: ₽ €
         0x2100, 0x214F, // Letterlike: № ™
         0x2190, 0x21FF, // Arrows
+        0x2200, 0x22FF, // Mathematical Operators: − ⊘
         0x2300, 0x23FF, // Misc Technical: ⏎
         0x2500, 0x259F, // Box Drawing + Block Elements
         0x25A0, 0x25FF, // Geometric Shapes

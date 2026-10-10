@@ -55,34 +55,47 @@ internal static unsafe partial class NetView
 
     public static void DrawCounters()
     {
-        ImGuiNET.ImGui.AlignTextToFramePadding();
-        Text("↓ ", Theme.P.Accent);
-        Text($"{NetCapture.TotalIn:N0}   ", Theme.P.Sub);
-        Text("↑ ", Theme.P.Accent2);
-        Text($"{NetCapture.TotalOut:N0}", Theme.P.Sub);
-        if (NetCapture.Paused) Text("   \uf04c paused", Theme.P.Yellow);   // Nerd Font pause (⏸ isn't in the font)
-        ImGuiNET.ImGui.NewLine();
-        DrawDocPills();
+        // The traffic graph (fixed width: the row never jumps) and the pause mark.
+        TrafficHistory.Smooth();
+        Widgets.Traffic(TrafficHistory.In, TrafficHistory.ScaleIn, TrafficHistory.Out, TrafficHistory.ScaleOut, TrafficHistory.Phase,
+            NetFeature.Short(TrafficHistory.RateIn), NetFeature.Short(TrafficHistory.RateOut));
+        if (NetCapture.Paused)
+        {
+            ImGuiNET.ImGui.SameLine(0f, 12f * D);
+            ImGuiNET.ImGui.AlignTextToFramePadding();
+            Text("\uf04c paused", Theme.P.Yellow);   // Nerd Font pause (⏸ isn't in the font)
+        }
+        // No NewLine: the tab row's RowSeparator comes back to this line with SameLine.
+        DrawTabRow();
     }
 
     public static void Draw()
     {
         var avail = ImGuiNET.ImGui.GetContentRegionAvail();
-        var left  = 20f * D;
-        var width = avail.X - 30f * D;
+        var left  = 10f * D;         // the same margin both sides
+        var width = avail.X - 20f * D;
 
         BeginKeys();
         ImGuiNET.ImGui.Dummy(new Vector2(0f, 6f * D));
 
-        // An open packet takes the whole tab; the "packets" pill goes back to the list.
-        if (ActiveDoc() is not null)
+        // Any other tab takes the whole body; "packets" goes back to the list.
+        if (_tabKind == TabKind.Packet && ActiveDoc() is null) ShowList();
+        if (_tabKind == TabKind.Draft && _activeDraft is null) ShowList();
+        if (!ListShown)
         {
             Update();   // the list keeps following the capture while it's hidden
             _sugShown = false;      // suggestions aren't drawn here: their stale rect would eat clicks
             _filterActive = false;  // nor the filter: it can't be the one with the keyboard
-            ImGuiNET.ImGui.SetCursorPosX(ImGuiNET.ImGui.GetCursorPosX() + left);
-            DrawInspector(width, MathF.Max(ImGuiNET.ImGui.GetContentRegionAvail().Y - 12f * D, 40f));
-            EndKeys();
+            ImGuiNET.ImGui.Indent(left);   // kept across the tab's own lines (SetCursorPosX would be lost at the first NewLine)
+            var bodyH = MathF.Max(ImGuiNET.ImGui.GetContentRegionAvail().Y - 12f * D, 40f);
+            switch (_tabKind)
+            {
+                case TabKind.Packet: DrawInspector(width, bodyH); break;
+                case TabKind.Frozen: DrawFrozenTab(width, bodyH); break;
+                case TabKind.Saved:  DrawSavedTab(width, bodyH); break;
+                case TabKind.Draft:  DrawDraftTab(_activeDraft!, width, bodyH); break;
+            }
+            ImGuiNET.ImGui.Unindent(left);
             return;
         }
 
@@ -105,30 +118,14 @@ internal static unsafe partial class NetView
         var sepY = ImGuiNET.ImGui.GetCursorScreenPos().Y - 2f * D;
         Gfx.HLine(dl, hp.X, hp.X + width, sepY, Theme.ToU32(Theme.P.Sep));
 
-        // The list.
-        var footerH = ImGuiNET.ImGui.GetTextLineHeightWithSpacing() + 10f * D;
+        // The list, down to a fixed bottom margin: nothing below it that could move.
         ImGuiNET.ImGui.SetCursorPosX(ImGuiNET.ImGui.GetCursorPosX() + left);
-        var listH = MathF.Max(ImGuiNET.ImGui.GetContentRegionAvail().Y - footerH, 40f);
+        var listH = MathF.Max(ImGuiNET.ImGui.GetContentRegionAvail().Y - 12f * D, 40f);
         ImGuiNET.ImGui.BeginChild("##netlist", new Vector2(width, listH), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollWithMouse);
         DrawRows(cols);
         ImGuiNET.ImGui.EndChild();
-        _bodyMin = ImGuiNET.ImGui.GetItemRectMin();
-        _bodyMax = ImGuiNET.ImGui.GetItemRectMax();
-
-        // Status line.
-        ImGuiNET.ImGui.SetCursorPosX(ImGuiNET.ImGui.GetCursorPosX() + left);
-        ImGuiNET.ImGui.Dummy(new Vector2(0f, 2f * D));
-        ImGuiNET.ImGui.SetCursorPosX(ImGuiNET.ImGui.GetCursorPosX() + left);
-        Text($"{_matches.Count:N0}", Theme.P.Sub);
-        Text($" of {NetCapture.Count:N0} match   ·   ", Theme.P.Muted);
-        Text($"↓ {NetFeature.Bytes(NetFeature.RateIn)}/s", Theme.P.Accent);
-        Text("   ", Theme.P.Muted);
-        Text($"↑ {NetFeature.Bytes(NetFeature.RateOut)}/s", Theme.P.Accent2);
-        Text($"   ·   buffer {NetCapture.Count:N0} / {NetCapture.Capacity:N0}", Theme.P.Muted);
-        ImGuiNET.ImGui.NewLine();
 
         DrawSuggestions();
-        EndKeys();
     }
 
     // ── model ────────────────────────────────────────────────────────────────────────────────
@@ -344,7 +341,7 @@ internal static unsafe partial class NetView
             ImGuiNET.ImGui.SetScrollY(MathF.Max(0f, ImGuiNET.ImGui.GetCursorPosY() - ghost * step
                 - ImGuiNET.ImGui.GetStyle().ItemSpacing.Y - ImGuiNET.ImGui.GetWindowHeight()));
         // A row selected with the keys holds the view (unless it is the newest one).
-        _stickToBottom = (atBottom && !(_selHold && _focused)) || _rows.Count == 0;
+        _stickToBottom = (atBottom && !_selHold) || _rows.Count == 0;
         // Selected on the newest row while following: the selection follows too.
         if (_selFollows && _stickToBottom && _rows.Count > 0) Select(_rows[^1].Seq, _rows[^1].Node, follows: true);
     }
@@ -365,8 +362,6 @@ internal static unsafe partial class NetView
         ImGuiNET.ImGui.PushID(unchecked((int)seq));
         var clicked = ImGuiNET.ImGui.InvisibleButton("##p", new Vector2(width, lineH)) && !MouseOverSuggestions;
         var hovered = ImGuiNET.ImGui.IsItemHovered() && !MouseOverSuggestions;
-        var open2   = !MouseOverSuggestions && (ImGuiNET.ImGui.IsItemClicked(ImGuiMouseButton.Middle)
-                      || (hovered && ImGuiNET.ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left)));
         if (!MouseOverSuggestions && ImGuiNET.ImGui.IsItemClicked(ImGuiMouseButton.Right))
         {
             // On a selected packet the menu is for the whole selection; elsewhere it selects that one.
@@ -377,26 +372,40 @@ internal static unsafe partial class NetView
         ImGuiNET.ImGui.PopID();
 
         // Ctrl+click adds/removes, Shift+click selects the range; neither unfolds the packet.
-        // A double or middle click opens it in the inspector.
+        // Ctrl+Shift+click opens it in the inspector.
         if (clicked)
         {
             var io = ImGuiNET.ImGui.GetIO();
-            if (io.KeyCtrl)       { ToggleMulti(seq); clicked = false; }
+            if (io.KeyCtrl && io.KeyShift) { OpenDoc(seq); clicked = false; }
+            else if (io.KeyCtrl)  { ToggleMulti(seq); clicked = false; }
             else if (io.KeyShift) { SelectRange(seq); clicked = false; Select(seq, null); }
             else                  { ClearMulti(); _anchor = seq; Select(seq, null); }
         }
-        if (open2 && !ImGuiNET.ImGui.GetIO().KeyCtrl && !ImGuiNET.ImGui.GetIO().KeyShift) OpenDoc(seq);
 
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
         var pad = 3f * D;
         var doc = IsDoc(seq);
+        var mark = p.Mark;
         // The fill: the multi-selection when there is one, else the keyboard row; the bar marks the
         // keyboard row only.
         var cursor   = IsSelected(seq, null);
         var selected = _multi.Count > 0 ? _multi.Contains(seq) : cursor;
-        if (open || hovered || doc || selected)
+        // What the active side did with it tints the row; the badge at the right end says what.
+        var tint = MarkTint(mark);
+        if (open || hovered || doc || selected || tint is not null)
             dl.AddRectFilled(pos - new Vector2(pad, pad * 0.5f), pos + new Vector2(width, lineH + pad * 0.5f),
-                Theme.ToU32(open || selected ? Theme.Sel : Theme.P.Raised), 6f * D);
+                Theme.ToU32(open || selected ? Theme.Sel : hovered || doc ? Theme.P.Raised : tint!.Value), 6f * D);
+        var badgeW = 0f;
+        if (mark != PacketMark.None)
+        {
+            var (label, color) = MarkBadge(mark, p.MarkCount);
+            var bw = ImGuiNET.ImGui.CalcTextSize(label).X + 12f * D;
+            var bx = pos.X + width - bw - 6f * D;
+            dl.AddRect(new Vector2(bx, pos.Y - 1f * D), new Vector2(bx + bw, pos.Y + lineH + 1f * D), Theme.ToU32(color), 5f * D, ImDrawFlags.None, 1f / UiScale.K);
+            dl.AddText(new Vector2(bx + 6f * D, pos.Y), Theme.ToU32(color), label);
+            badgeW = bw + 12f * D;
+            if (mark == PacketMark.Copy) dl.PushClipRect(pos, pos + new Vector2(width - badgeW, lineH), true);
+        }
         if (cursor) SelectionBar(dl, pos, lineH);
 
         var canOpen = open || p.Message is not null; // an unfolded packet can always be folded
@@ -408,10 +417,35 @@ internal static unsafe partial class NetView
         dl.AddText(pos + new Vector2(cols.Type, 0f), Theme.ToU32(p.Type.Name == "MsgState" ? Theme.P.Sub : Theme.P.Fg), p.Type.Name);
         var size = p.SizeText ??= NetFeature.Bytes(p.Size);
         dl.AddText(pos + new Vector2(cols.SizeRight - ImGuiNET.ImGui.CalcTextSize(size).X, 0f), Theme.ToU32(Theme.P.Sub), size);
-        dl.AddText(pos + new Vector2(cols.Summary, 0f), Theme.ToU32(Theme.P.Muted), NetDecode.Summary(p));
+        if (badgeW > 0f && mark != PacketMark.Copy) dl.PushClipRect(pos, pos + new Vector2(width - badgeW, lineH), true);
+        dl.AddText(pos + new Vector2(cols.Summary, 0f), Theme.ToU32(mark == PacketMark.Copy ? Theme.P.Sub : Theme.P.Muted), NetDecode.Summary(p));
+        if (badgeW > 0f) dl.PopClipRect();
+        if (mark == PacketMark.Blocked)
+            Gfx.HLine(dl, pos.X + cols.Type, pos.X + width - badgeW, pos.Y + lineH * 0.55f, Theme.ToU32(Theme.WithAlpha(Theme.P.Red, 0.7f)));
 
         if (clicked && canOpen) ToggleOpen(p);
     }
+
+    private static Vector4? MarkTint(PacketMark m) => m switch
+    {
+        PacketMark.Blocked    => Theme.WithAlpha(Theme.P.Red, 0.14f),
+        PacketMark.Frozen     => Theme.WithAlpha(Theme.P.Accent, 0.14f),
+        PacketMark.Duplicated => Theme.WithAlpha(Theme.P.Accent2, 0.14f),
+        PacketMark.Edited     => Theme.WithAlpha(Theme.P.Accent2, 0.14f),
+        PacketMark.Custom     => Theme.WithAlpha(Theme.P.Yellow, 0.12f),
+        _ => null,
+    };
+
+    private static (string Label, Vector4 Color) MarkBadge(PacketMark m, int count) => m switch
+    {
+        PacketMark.Blocked    => ("⊘ blocked", Theme.P.Red),
+        PacketMark.Frozen     => ("frozen", Theme.P.Accent),
+        PacketMark.Duplicated => ($"×{Math.Max(count, 2)}", Theme.P.Accent2),
+        PacketMark.Copy       => ("copy", Theme.P.Muted),
+        PacketMark.Edited     => ("edited", Theme.P.Accent2),
+        PacketMark.Custom     => ("custom", Theme.P.Yellow),
+        _ => ("", Theme.P.Muted),
+    };
 
     /// <summary>Unfolds a packet in place, or folds it back.</summary>
     private static void ToggleOpen(Packet p)

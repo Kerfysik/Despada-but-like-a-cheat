@@ -33,7 +33,7 @@ internal static partial class NetView
             _menuSel = null;
             if (_menuNode is null && _multi.Count > 1 && _multi.Contains(_menuSeq)) SnapshotSelection();
         }
-        if (!ImGuiNET.ImGui.BeginPopup("##netmenu")) return false;
+        if (!Widgets.BeginMenu("##netmenu", 320f)) return false;
         if (NetCapture.Get(_menuSeq) is not { } p)
             ImGuiNET.ImGui.CloseCurrentPopup();
         else if (_menuNode is not null)
@@ -42,7 +42,7 @@ internal static partial class NetView
             SelectionMenu();
         else
             PacketMenu(p);
-        ImGuiNET.ImGui.EndPopup();
+        Widgets.EndMenu();
         return true;
     }
 
@@ -68,57 +68,69 @@ internal static partial class NetView
     private static void SelectionMenu()
     {
         var ps = _menuSel!;
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Theme.P.Muted);
-        ImGuiNET.ImGui.TextUnformatted($"{ps.Count} packets");
-        ImGuiNET.ImGui.PopStyleColor();
-
-        if (ImGuiNET.ImGui.MenuItem(ps.Count > MaxDocs ? $"Open last {MaxDocs} in inspector" : "Open in inspector"))
-            OpenAll(ps);
-        ImGuiNET.ImGui.Separator();
-        if (ImGuiNET.ImGui.MenuItem("Copy summaries"))
+        Widgets.MenuCaption($"{ps.Count} packets");
+        if (Widgets.MenuItem(ps.Count > MaxDocs ? $"open last {MaxDocs} in tabs" : "open in tabs", Icon.Open)) OpenAll(ps);
+        Widgets.MenuSeparator();
+        if (Widgets.MenuItem("resend all, as they are", Icon.Up, enabled: NetActive.Armed && ps.Any(x => x.Message is not null)))
+            foreach (var x in ps.Where(x => x.Message is not null)) NetActive.Resend(x, 1, 0);
+        Widgets.MenuSeparator();
+        if (Widgets.MenuItem("copy summaries", Icon.Copy))
             Clipboard.Set(string.Join("\n", ps.Select(SummaryLine)));
-        if (ImGuiNET.ImGui.MenuItem("Copy fields", null, false, ps.Any(x => x.Message is not null)))
+        if (Widgets.MenuItem("copy fields", Icon.Copy, enabled: ps.Any(x => x.Message is not null)))
             Clipboard.Set(string.Join("\n", ps.Where(x => x.Message is not null)
                 .Select(x => $"#{x.Seq}\n" + NetDecode.ToText(NetDecode.Root(x)))));
-        if (ImGuiNET.ImGui.MenuItem("Copy hex", null, false, ps.Any(x => x.Bytes is not null)))
+        if (Widgets.MenuItem("copy hex", Icon.Copy, enabled: ps.Any(x => x.Bytes is not null)))
             Clipboard.Set(string.Join("\n\n", ps.Where(x => x.Bytes is not null).Select(x => $"#{x.Seq}\n" + HexText(x.Bytes!))));
-        ImGuiNET.ImGui.Separator();
+        Widgets.MenuSeparator();
 
         // "Only" works for one type (type: tokens are all required); hiding works for any number.
         var types = _menuTypes;
-        if (types.Count == 1 && ImGuiNET.ImGui.MenuItem($"Only type:{types[0]}")) AddFilter($"type:{types[0]}");
-        if (ImGuiNET.ImGui.MenuItem(types.Count == 1 ? $"Hide type:{types[0]}" : $"Hide these {types.Count} types"))
+        if (types.Count == 1 && Widgets.MenuItem($"only type:{types[0]}", Icon.Funnel)) AddFilter($"type:{types[0]}");
+        if (Widgets.MenuItem(types.Count == 1 ? $"hide type:{types[0]}" : $"hide these {types.Count} types", Icon.Funnel))
             foreach (var t in types) AddFilter($"-type:{t}");
         foreach (var id in _menuShared)
-            if (ImGuiNET.ImGui.MenuItem($"With entity {id}")) AddFilter($"entity:{id}");
-        ImGuiNET.ImGui.Separator();
-        if (ImGuiNET.ImGui.MenuItem("Clear selection")) ClearMulti();
+            if (Widgets.MenuItem($"with entity {id}##e{id}", Icon.Funnel)) AddFilter($"entity:{id}");
+        Widgets.MenuSeparator();
+        if (Widgets.MenuItem("clear selection", Icon.Cross)) ClearMulti();
     }
 
     private static void PacketMenu(Packet p)
     {
-        var type = p.Inner ?? p.Type.Name;
+        var type  = p.Inner ?? p.Type.Name;
+        var armed = NetActive.Armed;
+        var kept  = p.Message is not null;
 
-        if (ImGuiNET.ImGui.MenuItem("Open in inspector")) OpenDoc(p.Seq);
-        ImGuiNET.ImGui.Separator();
+        if (Widgets.MenuItem("open in a tab", Icon.Open)) OpenDoc(p.Seq);
+        if (Widgets.MenuItem(p.Dir == NetDir.In ? "deliver again" : "resend", p.Dir == NetDir.In ? Icon.Down : Icon.Up, enabled: armed && kept))
+            NetActive.Resend(p, 1, 0);
+        if (Widgets.MenuItem("edit and send", Icon.Pencil, enabled: armed && kept)) EditDoc(p.Seq);
+        if (Widgets.MenuItem("save…", enabled: kept)) SaveDoc(p);
+        Widgets.MenuSeparator();
 
-        if (ImGuiNET.ImGui.MenuItem("Copy summary"))
+        // A rule for this type and direction, in the action's colour.
+        Widgets.MenuCaption(type);
+        if (Widgets.MenuItem("block", dot: Theme.P.Red)) AddRule(p, RuleAction.Block);
+        if (Widgets.MenuItem("freeze", dot: Theme.P.Accent)) AddRule(p, RuleAction.Freeze);
+        if (Widgets.MenuItem("dup ×3", dot: Theme.P.Accent2)) AddRule(p, RuleAction.Duplicate);
+        Widgets.MenuSeparator();
+
+        if (Widgets.MenuItem("copy summary", Icon.Copy))
             Clipboard.Set($"#{p.Seq} {NetFeature.Time(p)} {(p.Dir == NetDir.In ? "in" : "out")} {p.Type.Name} {p.Size} B {NetDecode.Summary(p)}");
-        if (ImGuiNET.ImGui.MenuItem("Copy fields", null, false, p.Message is not null))
+        if (Widgets.MenuItem("copy fields", Icon.Copy, enabled: kept))
             Clipboard.Set(NetDecode.ToText(NetDecode.Root(p)));
         var bytes = p.Bytes;
-        if (ImGuiNET.ImGui.MenuItem("Copy hex", null, false, bytes is not null))
+        if (Widgets.MenuItem("copy hex", Icon.Copy, enabled: bytes is not null))
             Clipboard.Set(string.Join("\n", NetDecode.HexLines(bytes!).Select(l => $"{l.Offset}  {l.Hex} {l.Ascii}")));
-        ImGuiNET.ImGui.Separator();
+        Widgets.MenuSeparator();
 
-        if (ImGuiNET.ImGui.MenuItem($"Only type:{type}")) AddFilter($"type:{type}");
-        if (ImGuiNET.ImGui.MenuItem($"Hide type:{type}")) AddFilter($"-type:{type}");
-        if (ImGuiNET.ImGui.MenuItem($"Only tick {p.Tick}")) AddFilter($"tick:{p.Tick}");
+        if (Widgets.MenuItem($"only type:{type}", Icon.Funnel)) AddFilter($"type:{type}");
+        if (Widgets.MenuItem($"hide type:{type}", Icon.Funnel)) AddFilter($"-type:{type}");
+        if (Widgets.MenuItem($"only tick {p.Tick}", Icon.Funnel)) AddFilter($"tick:{p.Tick}");
         foreach (var id in p.Entities ?? [])
-            if (ImGuiNET.ImGui.MenuItem($"With entity {id}")) AddFilter($"entity:{id}");
-        ImGuiNET.ImGui.Separator();
+            if (Widgets.MenuItem($"with entity {id}##e{id}", Icon.Funnel)) AddFilter($"entity:{id}");
+        Widgets.MenuSeparator();
 
-        if (ImGuiNET.ImGui.MenuItem("Find in console"))
+        if (Widgets.MenuItem("find in console"))
         {
             Shell.ShowConsole();
             ConsolePanel.Run($"net.find type:{type} --last 20");
@@ -134,16 +146,16 @@ internal static partial class NetView
         var entity = node.Value?.GetType().Name == "NetEntity" ? NetDecode.Read(node.Value, "Id") as int? : null;
 
         // A long or multi-line string: the whole of it, not the shortened row.
-        if (ImGuiNET.ImGui.MenuItem("Copy value")) Clipboard.Set(node.Value as string ?? value);
-        if (node.CanExpand && ImGuiNET.ImGui.MenuItem("Copy as text")) Clipboard.Set(NetDecode.ToText(node));
+        if (Widgets.MenuItem("copy value", Icon.Copy)) Clipboard.Set(node.Value as string ?? value);
+        if (node.CanExpand && Widgets.MenuItem("copy as text", Icon.Copy)) Clipboard.Set(NetDecode.ToText(node));
         // Only offered when the filter keeps this packet: entity: knows the entities of MsgEntity
         // events, free text searches the type and summary.
         if (entity is { } id && p.Entities?.Contains(id) == true)
         {
-            if (ImGuiNET.ImGui.MenuItem($"With entity {id}")) AddFilter($"entity:{id}");
+            if (Widgets.MenuItem($"with entity {id}", Icon.Funnel)) AddFilter($"entity:{id}");
         }
         else if (value.Length is > 0 and < 60 && NetDecode.Summary(p).Contains(value.Trim('"'), StringComparison.OrdinalIgnoreCase)
-                 && ImGuiNET.ImGui.MenuItem($"With \"{value.Trim('"')}\""))
+                 && Widgets.MenuItem($"with \"{value.Trim('"')}\"", Icon.Funnel))
         {
             // Added as plain text: a value like "-1" or "@x" must not turn into a negation or preset.
             AddChip(new NetQuery.Token("", value.Trim('"'), false));
@@ -158,6 +170,6 @@ internal static partial class NetView
     private static void AddChip(NetQuery.Token t)
     {
         if (!_chips.Contains(t)) _chips.Add(t);
-        _activeDoc = -1;   // a filter from the inspector: show the list it now filters
+        ShowList();   // a filter from the inspector: show the list it now filters
     }
 }

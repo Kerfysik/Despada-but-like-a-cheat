@@ -2,28 +2,27 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-using System.Numerics;
 using Despada.ImGui;
 using Despada.ImGui.Hook;
 using ImGuiNET;
 
 namespace Despada.Modules.Net;
 
-// Keyboard for the Network tab. A click in the list, the inspector or the tab row focuses the tab;
-// a click anywhere else, or Esc in the list, gives the keyboard back to the game. While focused the
-// tab claims the keyboard (the game gets none of these keys).
+// Keyboard for the Network tab. The keys below are declared to the input hook every frame the tab
+// is shown (DeclareKeys) and work without a click, wherever the mouse is; any other key still plays
+// the game. A text field (filter, rename, editing) takes every key while it is active.
+// Esc walks back: cancel editing → the list → drop the selection.
 //
-//   tabs       Alt+1 list, Alt+2..9 open packets, Alt+[ / Alt+] previous/next, Alt+C close, Esc back to the list
+//   tabs       Alt+1..9 the tabs in order (packets · frozen · saved · open packets · drafts), Alt+[ / Alt+]
+//              previous/next, Alt+C close a packet or draft tab, Esc: cancel editing / back to the list
 //   list       ↑/↓ (k/j) select, Shift+↑/↓ extend, PgUp/PgDn, Home/End (End follows the newest again),
 //              Enter unfold, Ctrl+Enter open (the selection) in the inspector, Ctrl+A select all,
 //              Ctrl+C copy summaries, Esc drop the selection, / or Ctrl+F filter, Space pause
-//   mouse      click select, Ctrl+click add/remove, Shift+click range, double or middle click open
+//   mouse      click select, Ctrl+click add/remove, Shift+click range, Ctrl+Shift+click open
 //   inspector  Alt+↑/Alt+↓ previous/next packet of the list, 1/2/3 fold fields/related/bytes,
 //              ↑/↓ PgUp/PgDn Home/End scroll, Ctrl+C copy fields, Ctrl+Shift+C copy hex, Space pause
 internal static partial class NetView
 {
-    private static bool _focused;
-
     // The selected list row: a packet (Node null) or one of its unfolded fields.
     private static long       _selSeq = -1;
     private static FieldNode? _selNode;
@@ -31,8 +30,6 @@ internal static partial class NetView
     private static bool       _selHold;   // selected with the keys away from the newest row: the list holds still
     private static bool       _selFollows; // selected on the newest row: moves with it while the list follows
     private static bool       _followNow;  // End: follow the newest rows from this frame
-    private static int        _lastDrawFrame = -10;
-    private static int        _lastOpened = -1;
     private static bool       _popupAtBegin;
     private static int        _pageRows = 10;
 
@@ -40,14 +37,11 @@ internal static partial class NetView
     private static readonly HashSet<long> _multi = new();
     private static long _anchor = -1;
 
-    // Rects that keep the focus when clicked: the list or inspector, and the tab row's pills.
-    private static Vector2 _bodyMin, _bodyMax, _pillsMin, _pillsMax;
-
     // Scroll requested for the inspector, in lines / pages; ±2 = top / bottom.
     private static float _inspLines, _inspPages;
     private static int   _inspJump;
 
-    private static bool IsSelected(long seq, FieldNode? node) => _focused && _selSeq == seq && _selNode == node;
+    private static bool IsSelected(long seq, FieldNode? node) => _selSeq == seq && _selNode == node;
 
     private static void Select(long seq, FieldNode? node, bool follows = false)
     {
@@ -70,7 +64,7 @@ internal static partial class NetView
                 return;
             }
             // The first Ctrl+click keeps the packet selected before it, if it is a listed packet row.
-            if (_focused && _selSeq >= 0 && _selNode is null && _matches.BinarySearch(_selSeq) >= 0) _multi.Add(_selSeq);
+            if (_selSeq >= 0 && _selNode is null && _matches.BinarySearch(_selSeq) >= 0) _multi.Add(_selSeq);
         }
         if (!_multi.Remove(seq)) _multi.Add(seq);
         Select(seq, null);   // the keyboard row moves along
@@ -94,52 +88,60 @@ internal static partial class NetView
         return seqs.Select(NetCapture.Get).OfType<Packet>().ToList();
     }
 
-    private static void Unfocus()
+    /// <summary>Esc with nothing else to cancel: the keyboard row goes, the list follows again.</summary>
+    private static void DropSelection()
     {
-        _focused = false;
+        _selSeq = -1;
+        _selNode = null;
         _selHold = false;
     }
 
-    /// <summary>Start of Draw: forget focus after the tab was hidden, claim the keyboard, run the keys.</summary>
+    /// <summary>The keys this tab listens for right now, kept from the game for the next frame.</summary>
+    private static void DeclareKeys()
+    {
+        // Tab keys.
+        ImGuiInputHook.Want(ImGuiKey.Escape);
+        ImGuiInputHook.Want(ImGuiKey.LeftBracket, Mod.Alt);
+        ImGuiInputHook.Want(ImGuiKey.RightBracket, Mod.Alt);
+        ImGuiInputHook.Want(ImGuiKey.C, Mod.Alt);
+        for (var i = 0; i < 9; i++) ImGuiInputHook.Want(ImGuiKey._1 + i, Mod.Alt);
+
+        if (_tabKind == TabKind.Packet)
+        {
+            ImGuiInputHook.Want(ImGuiKey.UpArrow, Mod.None | Mod.Alt);
+            ImGuiInputHook.Want(ImGuiKey.DownArrow, Mod.None | Mod.Alt);
+            ImGuiInputHook.Want(ImGuiKey.C, Mod.Ctrl | Mod.CtrlShift);
+            foreach (var k in new[] { ImGuiKey._1, ImGuiKey._2, ImGuiKey._3, ImGuiKey.Keypad1, ImGuiKey.Keypad2, ImGuiKey.Keypad3,
+                                      ImGuiKey.K, ImGuiKey.J, ImGuiKey.PageUp, ImGuiKey.PageDown, ImGuiKey.Home, ImGuiKey.End, ImGuiKey.Space })
+                ImGuiInputHook.Want(k);
+        }
+        else if (ListShown)
+        {
+            foreach (var k in new[] { ImGuiKey.UpArrow, ImGuiKey.DownArrow, ImGuiKey.K, ImGuiKey.J })
+                ImGuiInputHook.Want(k, Mod.None | Mod.Shift);
+            foreach (var k in new[] { ImGuiKey.PageUp, ImGuiKey.PageDown, ImGuiKey.Home, ImGuiKey.End, ImGuiKey.Slash, ImGuiKey.Space })
+                ImGuiInputHook.Want(k);
+            ImGuiInputHook.Want(ImGuiKey.Enter, Mod.None | Mod.Ctrl);
+            ImGuiInputHook.Want(ImGuiKey.KeypadEnter, Mod.None | Mod.Ctrl);
+            ImGuiInputHook.Want(ImGuiKey.A, Mod.Ctrl);
+            ImGuiInputHook.Want(ImGuiKey.C, Mod.Ctrl);
+            ImGuiInputHook.Want(ImGuiKey.F, Mod.Ctrl);
+        }
+    }
+
+    /// <summary>Start of Draw: declare the keys, run them (the tab keys also from the filter field).</summary>
     private static void BeginKeys()
     {
-        // Not drawn last frame (another tab) or the overlay was closed since: the focus is gone.
-        var frame = ImGuiNET.ImGui.GetFrameCount();
-        if (frame != _lastDrawFrame + 1 || ImGuiRenderer.Opened != _lastOpened) Unfocus();
-        _lastDrawFrame = frame;
-        _lastOpened = ImGuiRenderer.Opened;
-
         var io = ImGuiNET.ImGui.GetIO();
-        if (_focused && !io.WantTextInput) ImGuiInputHook.ClaimKeyboard();
-
-        // Keys work while focused, and the tab keys also from the filter field.
+        DeclareKeys();
         _popupAtBegin = ImGuiNET.ImGui.IsPopupOpen("", ImGuiPopupFlags.AnyPopupId);
         if (_popupAtBegin) return;
         if (_filterActive) { TabKeys(io); return; }
-        if (!_focused || io.WantTextInput) return;
+        if (io.WantTextInput) return;
 
         if (TabKeys(io)) return;
-        if (ActiveDoc() is not null) InspectorKeys(io);
-        else                         ListKeys(io);
-    }
-
-    /// <summary>End of Draw: a click inside the tab focuses it, anywhere else unfocuses it.</summary>
-    private static void EndKeys()
-    {
-        if (!ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Left) && !ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Right)
-            && !ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Middle))
-            return;
-        // A click that picked a menu item (anywhere on screen) keeps the focus as it was.
-        if (_popupAtBegin) return;
-        var m = ImGuiNET.ImGui.GetIO().MousePos;
-        bool In(Vector2 a, Vector2 b) => m.X >= a.X && m.X < b.X && m.Y >= a.Y && m.Y < b.Y;
-        if ((In(_bodyMin, _bodyMax) || In(_pillsMin, _pillsMax)) && !MouseOverSuggestions)
-        {
-            _focused = true;
-            ImGuiInputHook.ClaimKeyboard();   // before the next input batch
-        }
-        else
-            Unfocus();
+        if (_tabKind == TabKind.Packet) InspectorKeys(io);
+        else if (ListShown)             ListKeys(io);
     }
 
     private static bool Key(ImGuiKey k, bool repeat = true) => ImGuiNET.ImGui.IsKeyPressed(k, repeat);
@@ -150,33 +152,31 @@ internal static partial class NetView
         {
             if (Key(ImGuiKey.Escape, false) && !_filterActive)
             {
-                if (_activeDoc >= 0)     _activeDoc = -1;
-                else if (_multi.Count > 0) ClearMulti();
-                else                     Unfocus();
+                if (_editing is not null && _tabKind == TabKind.Packet && _editingSeq == _activeDoc) CancelEdit();
+                else if (!ListShown)          ShowList();
+                else if (_multi.Count > 0)    ClearMulti();
+                else                          DropSelection();
                 return true;
             }
             return false;
         }
 
-        // The tabs in order: the list (-1), then the open packets.
-        var order = new List<long>(_docs.Count + 1) { -1 };
-        order.AddRange(_docs);
-        var cur = Math.Max(0, order.IndexOf(_activeDoc));
-
-        if (Key(ImGuiKey.LeftBracket))       _activeDoc = order[(cur - 1 + order.Count) % order.Count];
-        else if (Key(ImGuiKey.RightBracket)) _activeDoc = order[(cur + 1) % order.Count];
+        // Alt+1..9, Alt+[ / ] over the tabs in their order; Alt+C closes a packet or draft tab.
+        var tabs = Tabs(out var cur);
+        if (Key(ImGuiKey.LeftBracket))       Activate(tabs[(cur - 1 + tabs.Count) % tabs.Count]);
+        else if (Key(ImGuiKey.RightBracket)) Activate(tabs[(cur + 1) % tabs.Count]);
         else if (Key(ImGuiKey.C, false))
         {
-            if (_activeDoc >= 0) CloseDoc(_activeDoc);
+            if (tabs[cur].Closable) CloseTab(tabs[cur]);
         }
-        else if (ActiveDoc() is { } p && (Key(ImGuiKey.UpArrow) || Key(ImGuiKey.DownArrow)))
+        else if (_tabKind == TabKind.Packet && ActiveDoc() is { } p && (Key(ImGuiKey.UpArrow) || Key(ImGuiKey.DownArrow)))
             StepDoc(p.Seq, Key(ImGuiKey.UpArrow) ? -1 : +1);
         else
         {
             for (var i = 0; i < 9; i++)
                 if (Key(ImGuiKey._1 + i, false))
                 {
-                    if (i < order.Count) _activeDoc = order[i];
+                    if (i < tabs.Count) Activate(tabs[i]);
                     break;
                 }
         }
@@ -236,7 +236,12 @@ internal static partial class NetView
         else if (Key(ImGuiKey.Home, false)) MoveSelection(int.MinValue);
         else if (Key(ImGuiKey.End, false)) MoveSelection(int.MaxValue);
         else if (Key(ImGuiKey.Enter, false) || Key(ImGuiKey.KeypadEnter, false)) ToggleSelected();
-        else if (Key(ImGuiKey.Slash, false)) _focusFilter = true;
+        else if (Key(ImGuiKey.Slash, false))
+        {
+            // The field activates a frame later and that "/" is lost: put it in, a command starts.
+            _focusFilter = true;
+            if (_bar.Text.Length == 0) _bar.Text = "/";
+        }
         else if (Key(ImGuiKey.Space, false)) NetCapture.Paused = !NetCapture.Paused;
     }
 
@@ -256,7 +261,6 @@ internal static partial class NetView
 
         if (Key(ImGuiKey._1, false) || Key(ImGuiKey.Keypad1, false)) _showFields = !_showFields;
         else if (Key(ImGuiKey._2, false) || Key(ImGuiKey.Keypad2, false)) _showRelated = !_showRelated;
-        else if (Key(ImGuiKey._3, false) || Key(ImGuiKey.Keypad3, false)) _showBytes = !_showBytes;
         else if (Key(ImGuiKey.UpArrow) || Key(ImGuiKey.K)) _inspLines -= 1f;
         else if (Key(ImGuiKey.DownArrow) || Key(ImGuiKey.J)) _inspLines += 1f;
         else if (Key(ImGuiKey.PageUp)) _inspPages -= 1f;

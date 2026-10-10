@@ -24,10 +24,16 @@ public static class ImGuiInputHook
     /// <summary>An ImGui text field has focus (WantCaptureKeyboard also counts a panel's claim).</summary>
     public static volatile bool WantTextInput = false;
 
-    // A panel that works the keyboard without a text field (the network list with its hotkeys)
-    // claims it for every frame it is focused; the claim applies from the next frame on.
+    // Keyboard policy. An active text field takes every key. Otherwise the shown panel declares,
+    // every frame, the keys it listens for (Want: key + modifier combinations) and only those are
+    // kept from the game; the rest, WASD included, play on with the overlay open. Declarations
+    // apply from the next input batch, which runs before the next render. ClaimKeyboard is the
+    // blunt form: every key, for a panel that really needs them all.
     private static bool _claimNext;
     private static bool _claimed;
+    // Keyed by (int)ImGuiKey, a byte of Mod bits: no ImGui.NET value type in a field (type load).
+    private static Dictionary<int, byte> _wantNext = new();
+    private static volatile Dictionary<int, byte> _want = new();
 
     /// <summary>
     /// Keeps keys from the game, as an active text field does: right away (the next input batch,
@@ -38,6 +44,30 @@ public static class ImGuiInputHook
         _claimNext = true;
         if (ImGuiRenderer.OverlayVisible) WantCaptureKeyboard = true;
     }
+
+    /// <summary>
+    /// The panel listens for this key with these modifier combinations (from the next input batch,
+    /// for one frame: declare it every frame it is shown). Modifier keys themselves always reach
+    /// the game.
+    /// </summary>
+    public static void Want(ImGuiKey key, Mod mods = Mod.None)
+    {
+        var k = (int)key;
+        _wantNext[k] = (byte)(_wantNext.GetValueOrDefault(k) | (byte)mods);
+    }
+
+    private static bool Wants(ImGuiKey key, bool ctrl, bool shift, bool alt)
+    {
+        if (key == ImGuiKey.None || !_want.TryGetValue((int)key, out var m)) return false;
+        var bit = 1 << ((ctrl ? 1 : 0) | (shift ? 2 : 0) | (alt ? 4 : 0));
+        return (m & bit) != 0;
+    }
+
+    // A key the game would also turn into text (chat): its text event is dropped when the key is.
+    private static bool ProducesText(ImGuiKey k) =>
+        k is >= ImGuiKey.A and <= ImGuiKey.Z or >= ImGuiKey._0 and <= ImGuiKey._9
+          or >= ImGuiKey.Apostrophe and <= ImGuiKey.GraveAccent or ImGuiKey.Space
+          or >= ImGuiKey.Keypad0 and <= ImGuiKey.KeypadEqual;
 
     public static void FlushEvents()
     {
@@ -56,6 +86,8 @@ public static class ImGuiInputHook
         while (_ioQueue.TryDequeue(out _)) { }
         _gameHeld.Clear();
         _claimNext = _claimed = false;
+        _wantNext.Clear();
+        _want = new Dictionary<int, byte>();
         WantCaptureMouse    = false;
         WantCaptureKeyboard = false;
         WantTextInput       = false;
@@ -65,6 +97,9 @@ public static class ImGuiInputHook
     {
         _claimed   = _claimNext && ImGuiRenderer.OverlayVisible;
         _claimNext = false;
+        // Publish this frame's declarations; the input batch reads _want, Draw fills _wantNext.
+        (_want, _wantNext) = (_wantNext, _want);
+        _wantNext.Clear();
         if (!ImGuiRenderer.OverlayVisible)
         {
             WantCaptureMouse = false;
@@ -246,10 +281,22 @@ public static class ImGuiInputHook
         }
 
         // ImGui always sees the event so its state stays consistent; the game gets it
-        // unless ImGui wants this kind of input (hovered window / active text field).
+        // unless ImGui wants this kind of input: hovered window, active text field, a claim, or
+        // a key the shown panel declared (Want).
         var isMouse = EnqueueKey(args, key, down: true);
         if (isMouse ? WantCaptureMouse : WantCaptureKeyboard)
             return false;
+        if (!isMouse)
+        {
+            var ctrl  = Convert.ToBoolean(Read(args, "Control") ?? false);
+            var shift = Convert.ToBoolean(Read(args, "Shift") ?? false);
+            var alt   = Convert.ToBoolean(Read(args, "Alt") ?? false);
+            if (Wants(imKey, ctrl, shift, alt))
+            {
+                if (!ctrl && ProducesText(imKey)) _suppressText = true;
+                return false;
+            }
+        }
 
         _gameHeld.Add(keyByte);
         return true;
@@ -401,6 +448,24 @@ public static class ImGuiInputHook
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
         return pi?.GetValue(obj);
     }
+}
+
+/// <summary>
+/// Modifier combinations a key is wanted with (<see cref="ImGuiInputHook.Want"/>); one bit per
+/// combination, so they add up: <c>Mod.None | Mod.Shift</c> is the key plain and with Shift.
+/// </summary>
+[Flags]
+public enum Mod : byte
+{
+    None         = 1 << 0,
+    Ctrl         = 1 << 1,
+    Shift        = 1 << 2,
+    CtrlShift    = 1 << 3,
+    Alt          = 1 << 4,
+    CtrlAlt      = 1 << 5,
+    ShiftAlt     = 1 << 6,
+    CtrlShiftAlt = 1 << 7,
+    Any          = 0xFF
 }
 
 public static class ImGuiSdl3TextInputStopPatch

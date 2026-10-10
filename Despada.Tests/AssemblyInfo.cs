@@ -4,5 +4,5 @@
 
 using Xunit;
 
-// The core registries (hooks, features, lifecycle) are process-wide statics.
+// NetCapture and NetActive are static: tests that use them can't run alongside each other.
 [assembly: CollectionBehavior(DisableTestParallelization = true)]

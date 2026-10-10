@@ -26,6 +26,14 @@ internal static class NetTypes
 
     private static volatile (string Name, Kind Kind)[] _all = [];
     private static volatile string[] _names = [];
+    private static volatile Dictionary<string, Type> _types = new();
+
+    /// <summary>The type behind a listed name ("BUI.X" included); null when not (yet) known.</summary>
+    public static Type? Resolve(string name)
+    {
+        Refresh();
+        return _types.GetValueOrDefault(name);
+    }
     private static int  _scanning;
     private static volatile int _state;   // 0 not read yet, 1 read, 2 failed
 
@@ -61,9 +69,10 @@ internal static class NetTypes
         {
             try
             {
-                var found = Scan(game, Engine.NetMessage.Type);
+                var found = Scan(game, Engine.NetMessage.Type, out var types);
                 _all   = found.ToArray();
                 _names = found.Select(t => t.Name).ToArray();
+                _types = types;
                 _state = 1;
             }
             catch (Exception ex)
@@ -87,8 +96,13 @@ internal static class NetTypes
 
     /// <summary>The wire types defined in <paramref name="assemblies"/>, sorted by name. Exposed for tests.</summary>
     internal static List<(string Name, Kind Kind)> Scan(IEnumerable<Assembly> assemblies, Type? netMessage)
+        => Scan(assemblies, netMessage, out _);
+
+    internal static List<(string Name, Kind Kind)> Scan(IEnumerable<Assembly> assemblies, Type? netMessage,
+        out Dictionary<string, Type> byName)
     {
         var found = new Dictionary<string, Kind>(StringComparer.Ordinal);
+        byName = new Dictionary<string, Type>(StringComparer.Ordinal);
         foreach (var asm in assemblies)
         {
             Type?[] types;
@@ -102,13 +116,17 @@ internal static class NetTypes
                 try
                 {
                     if (netMessage is not null && t.IsSubclassOf(netMessage))
-                        found.TryAdd(t.Name, Kind.Message);
+                    {
+                        if (found.TryAdd(t.Name, Kind.Message)) byName[t.Name] = t;
+                    }
                     else if (DerivesFrom(t, BuiBase))
                     {
-                        if (IsNetSerializable(t)) found.TryAdd("BUI." + t.Name, Kind.Bui);
+                        if (IsNetSerializable(t) && found.TryAdd("BUI." + t.Name, Kind.Bui)) byName["BUI." + t.Name] = t;
                     }
                     else if (DerivesFrom(t, EventBase) && !DerivesFrom(t, WrapBase) && IsNetSerializable(t))
-                        found.TryAdd(t.Name, Kind.Event);
+                    {
+                        if (found.TryAdd(t.Name, Kind.Event)) byName[t.Name] = t;
+                    }
                 }
                 catch
                 {

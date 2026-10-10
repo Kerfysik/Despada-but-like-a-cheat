@@ -37,6 +37,7 @@ internal static unsafe partial class NetView
     // hit-tested here (before the field loses focus to the click) and the rows under it ignore the mouse.
     private static Vector2 _sugMin, _sugMax;
     private static float   _sugRowH;
+    private static float   _sugRowsY;   // the first row's top (the box has padding above it)
     private static bool    _sugShown;
 
     private static bool MouseOverSuggestions
@@ -58,7 +59,8 @@ internal static unsafe partial class NetView
         var word = _bar.Text.Trim();
         var partialKey = word.TrimStart('-') is var w && (w.Length == 0 || w == "@" ||
                          NetQuery.Keys.Any(k => k.StartsWith(w, StringComparison.OrdinalIgnoreCase) && !w.Contains(':')));
-        if (!partialKey && !_bar.Text.EndsWith(':') && NetQuery.ParseToken(word) is { } live) q.Tokens.Add(live);
+        // A "/command" being typed is not a filter: the list must not empty under it.
+        if (!partialKey && !_bar.Text.EndsWith(':') && !HasSlash(_bar.Text) && NetQuery.ParseToken(word) is { } live) q.Tokens.Add(live);
         key = string.Join(' ', q.Tokens);
         return q;
     }
@@ -68,7 +70,7 @@ internal static unsafe partial class NetView
         // A click on last frame's completion list picks that completion.
         if (_sugShown && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Left) && MouseOverSuggestions)
         {
-            var i = (int)((ImGuiNET.ImGui.GetIO().MousePos.Y - _sugMin.Y) / _sugRowH);
+            var i = (int)MathF.Floor((ImGuiNET.ImGui.GetIO().MousePos.Y - _sugRowsY) / _sugRowH);
             if (i >= 0 && i < _bar.Sug.Count)
             {
                 _bar.ReplaceWith = _bar.Sug[i].Insert;
@@ -93,8 +95,15 @@ internal static unsafe partial class NetView
 
         // The filters button, part of the bar: its right end, full height, the bar's corners.
         var buttonX = DrawFiltersButton(dl, boxMin, boxMax, r);
-        // The outline last, over the button's fill, so it stays one unbroken line around both.
-        dl.AddRect(boxMin, boxMax, Theme.ToU32(Theme.P.Sep), r, ImDrawFlags.None, 1f / UiScale.K);
+        // Before it, the match count: "12409/12409", muted.
+        var count  = $"{_matches.Count}/{NetCapture.Count}";
+        var countW = ImGuiNET.ImGui.CalcTextSize(count).X;
+        dl.AddText(new Vector2(buttonX - 14f * D - countW, pos.Y + pad.Y), Theme.ToU32(Theme.P.Muted), count);
+        buttonX -= countW + 14f * D;
+        // The outline last, over the button's fill, so it stays one unbroken line around both;
+        // the focus ring over that.
+        dl.AddRect(boxMin, boxMax, Theme.ToU32(Theme.Hairline), r, ImDrawFlags.None, 1f / UiScale.K);
+        Gfx.FocusRing(dl, boxMin, boxMax, r, Widgets.Hover(ImGuiNET.ImGui.GetID("##netfilter"), _filterActive));
 
         // The text field fills the rest with the bar, frameless.
         ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x, pos.Y));
@@ -122,9 +131,11 @@ internal static unsafe partial class NetView
         // Completions for the word under the caret, shown under it.
         var word = CurrentWord(_bar.Text);
         if (_bar.ReplaceWith is null)
-            _bar.Sug = _filterActive && (word.Length > 0 || _chips.Count == 0)
-                ? NetQuery.Suggest(word, TypeSource(), KnownEntities(word)).Take(10).ToList()
-                : [];
+            _bar.Sug = !_filterActive ? []
+                     : word.StartsWith('/') ? SlashSuggest(word)
+                     : HasSlash(_bar.Text) ? []   // a command's arguments: no filter completions
+                     : word.Length > 0 || _chips.Count == 0 ? NetQuery.Suggest(word, TypeSource(), KnownEntities(word)).Take(10).ToList()
+                     : [];
         if (_bar.Sug.Count == 1 && _bar.Sug[0].Insert == word) _bar.Sug.Clear();
         _bar.SugIndex = Math.Clamp(_bar.SugIndex, 0, Math.Max(0, _bar.Sug.Count - 1));
         _sugAt = new Vector2(x + ImGuiNET.ImGui.CalcTextSize(_bar.Text[..^word.Length]).X + pad.X, pos.Y + h + 4f * D);
@@ -133,29 +144,29 @@ internal static unsafe partial class NetView
         ImGuiNET.ImGui.Dummy(new Vector2(width, h));
     }
 
-    /// <summary>Draws the bar's "N filters ▾" end and its panel; returns the button's left x.</summary>
+    /// <summary>Draws the bar's funnel end and its panel; returns the button's left x.</summary>
+    // A funnel with the filter count beside it, at the bar's right end.
     private static float DrawFiltersButton(ImDrawListPtr dl, Vector2 boxMin, Vector2 boxMax, float r)
     {
         var n      = _chips.Count;
-        var label  = n == 0 ? "filters" : n == 1 ? "1 filter" : $"{n} filters";
         var padX   = 12f * D;
-        var labelW = ImGuiNET.ImGui.CalcTextSize(label).X;
-        var w      = padX + labelW + 10f * D + ImGuiNET.ImGui.CalcTextSize("▾").X + padX;
+        var countW = n > 0 ? ImGuiNET.ImGui.CalcTextSize(n.ToString()).X + 8f : 0f;
+        var w      = padX + 18f + countW + padX;
         var min    = new Vector2(UiScale.Snap(boxMax.X - w), boxMin.Y);
 
         ImGuiNET.ImGui.SetCursorScreenPos(min);
         if (ImGuiNET.ImGui.InvisibleButton("##filters", boxMax - min)) ImGuiNET.ImGui.OpenPopup("##filters-panel");
         var hovered = ImGuiNET.ImGui.IsItemHovered();
         var open    = ImGuiNET.ImGui.IsPopupOpen("##filters-panel");
+        var hot     = Widgets.Hover(ImGuiNET.ImGui.GetItemID(), hovered || open);
 
         // To the bar's edge with its corners; the bar's outline is drawn over it afterwards.
-        var fill = n > 0 ? Theme.Sel : hovered || open ? Theme.P.Raised : Vector4.Zero;
-        if (fill.W > 0f)
-            dl.AddRectFilled(min, boxMax, Theme.ToU32(fill), r, ImDrawFlags.RoundCornersRight);
-        Gfx.VLine(dl, min.X, boxMin.Y, boxMax.Y, Theme.ToU32(Theme.P.Sep));
-        var ty = boxMin.Y + (boxMax.Y - boxMin.Y - ImGuiNET.ImGui.GetTextLineHeight()) * 0.5f;
-        dl.AddText(new Vector2(min.X + padX, ty), Theme.ToU32(n > 0 || hovered ? Theme.P.Fg : Theme.P.Muted), label);
-        dl.AddText(new Vector2(min.X + padX + labelW + 10f * D, ty), Theme.ToU32(Theme.P.Muted), "▾");
+        if (hot > 0.01f)
+            dl.AddRectFilled(min, boxMax, Theme.ToU32(Theme.WithAlpha(Theme.RaisedFill, Theme.RaisedFill.W * hot)), r, ImDrawFlags.RoundCornersRight);
+        var cy = (boxMin.Y + boxMax.Y) * 0.5f;
+        Widgets.DrawIcon(dl, new Vector2(min.X + padX + 9f, cy), 18f, Icon.Funnel, Theme.Mix(Theme.P.Muted, Theme.P.Sub, hot));
+        if (n > 0)
+            dl.AddText(new Vector2(min.X + padX + 18f + 8f, cy - ImGuiNET.ImGui.GetTextLineHeight() * 0.5f), Theme.ToU32(Theme.P.Accent), n.ToString());
 
         DrawFiltersPanel(boxMax);
         return min.X;
@@ -381,35 +392,11 @@ internal static unsafe partial class NetView
         _sugShown = _bar.Sug.Count > 0;
         if (!_sugShown) return;
 
-        var dl    = ImGuiNET.ImGui.GetForegroundDrawList();
-        var rowH  = ImGuiNET.ImGui.GetTextLineHeight() + 8f * D;
-        var padX  = 12f * D;
-        var nameW = _bar.Sug.Max(s => ImGuiNET.ImGui.CalcTextSize(s.Insert).X) + 24f * D;
-        var hintW = _bar.Sug.Max(s => ImGuiNET.ImGui.CalcTextSize(s.Hint).X);
-        // On the framebuffer grid, so the 1 px outline is one pixel row (see DrawFilterBar).
-        var min   = UiScale.Snap(_sugAt);
-        var size  = UiScale.Snap(min + new Vector2(nameW + hintW + padX * 2f, rowH * _bar.Sug.Count)) - min;
-        var r     = 10f * D;
-        _sugMin = min;
-        _sugMax = min + size;
-        _sugRowH = rowH;
-
-        dl.AddRectFilled(min, min + size, Theme.ToU32(Theme.P.Pop), r);
-        var flags = _bar.Sug.Count == 1 ? ImDrawFlags.RoundCornersAll
-                  : _bar.SugIndex == 0 ? ImDrawFlags.RoundCornersTop
-                  : _bar.SugIndex == _bar.Sug.Count - 1 ? ImDrawFlags.RoundCornersBottom
-                  : ImDrawFlags.RoundCornersNone;
-        var hl = new Vector2(min.X, min.Y + rowH * _bar.SugIndex);
-        dl.AddRectFilled(hl, hl + new Vector2(size.X, rowH), Theme.ToU32(Theme.Sel), r, flags);
-
-        for (var i = 0; i < _bar.Sug.Count; i++)
-        {
-            var y = min.Y + rowH * i + 4f * D;
-            var (insert, hint) = _bar.Sug[i];
-            dl.AddText(new Vector2(min.X + padX, y), Theme.ToU32(insert.Contains('@') ? Theme.P.Accent2 : Theme.P.Fg), insert);
-            dl.AddText(new Vector2(min.X + padX + nameW, y), Theme.ToU32(i == _bar.SugIndex ? Theme.P.Sub : Theme.P.Muted), hint);
-        }
-        dl.AddRect(min, min + size, Theme.ToU32(Theme.P.Sep), r, ImDrawFlags.None, 1f / UiScale.K);
+        // The list under the caret: names only, the picked one's hint beside (form A2).
+        Widgets.Completions(ImGuiNET.ImGui.GetForegroundDrawList(), _sugAt, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_bar.Sug),
+            _bar.SugIndex, CurrentWord(_bar.Text), out _sugMin, out _sugMax, out _);
+        _sugRowH  = Widgets.CompletionRowH;
+        _sugRowsY = _sugMin.Y + Widgets.CompletionPad;
     }
 
     // ── text field callback ──────────────────────────────────────────────────────────────────
@@ -477,6 +464,13 @@ internal static unsafe partial class NetView
     // Every complete word in the field becomes a chip; the field is emptied.
     private static void Commit(ImGuiInputTextCallbackDataPtr data, string text, bool enter = false)
     {
+        // A "/command" in the bar makes a rule from the filter (Enter); a space only adds tokens.
+        if (_cb == _bar && HasSlash(text))
+        {
+            if (!enter) return;
+            if (RunSlash(text)) { Replace(data, ""); _cb.SugIndex = 0; }
+            return;
+        }
         // In the panel, Enter on a preset's name toggles it ("quiet", "-ui"); "@q…" also takes a
         // prefix that names exactly one. Space and accepted completions just add tokens.
         if (_cb == _panel && enter && PresetNamed(text.Trim()) is { } preset)
@@ -486,6 +480,78 @@ internal static unsafe partial class NetView
                 if (NetQuery.ParseToken(w) is { } t) AddChip(t);
         Replace(data, "");
         _cb.SugIndex = 0;
+    }
+
+    // ── "/" commands: a rule from the current filter ─────────────────────────────────────────
+
+    private static readonly (string Name, RuleAction? Action, string Hint)[] Slash =
+    [
+        ("/block",   RuleAction.Block,     "drop the matching packets"),
+        ("/freeze",  RuleAction.Freeze,    "hold them in the frozen tab"),
+        ("/dup",     RuleAction.Duplicate, "send copies: /dup 3 50"),
+        ("/modify",  RuleAction.Modify,    "change fields: /modify Field=value"),
+        ("/release", null,                 "let every frozen packet go"),
+        ("/drop",    null,                 "throw every frozen packet away"),
+        ("/clear",   null,                 "drop every filter"),
+    ];
+
+    private static List<(string Insert, string Hint)> SlashSuggest(string word)
+        => Slash.Where(s => s.Name.StartsWith(word, StringComparison.OrdinalIgnoreCase)).Select(s => (s.Name, s.Hint)).ToList();
+
+    // A word that starts a command (a "/" inside a path or a plain-text search is not one).
+    private static bool HasSlash(string text)
+        => text.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Any(w => w.StartsWith('/') && Slash.Any(s => s.Name.StartsWith(w, StringComparison.OrdinalIgnoreCase)));
+
+    /// <summary>
+    /// "type:X dir:out /block", "/dup 3 50", "/modify Range=0.35 Alpha=1": the tokens before the
+    /// command join the chips as the rule's filter; the words after it are its parameters.
+    /// </summary>
+    private static bool RunSlash(string text)
+    {
+        var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
+        var at = words.FindIndex(w => w.StartsWith('/'));
+        if (at < 0) return false;
+        var cmd = Slash.FirstOrDefault(s => s.Name.Equals(words[at], StringComparison.OrdinalIgnoreCase));
+        if (cmd.Name is null)
+        {
+            ImGuiRenderer.ShowToast("network", $"{words[at]}: no such command", 2f);
+            return false;
+        }
+        if (cmd.Action is null)
+        {
+            switch (cmd.Name)
+            {
+                case "/clear":   _chips.Clear(); break;
+                case "/release": NetActive.ReleaseAll(); break;
+                case "/drop":    NetActive.DropAll(); break;
+            }
+            return true;
+        }
+        var tokens = new List<NetQuery.Token>(_chips);
+        foreach (var w in words.Take(at))
+            if (NetQuery.ParseToken(w) is { } t && !tokens.Contains(t)) tokens.Add(t);
+        if (tokens.Count == 0)
+        {
+            ImGuiRenderer.ShowToast("network", "a rule needs a filter: type:… dir:… entity:…", 2.5f);
+            return false;
+        }
+        var args = words.Skip(at + 1).ToList();
+        var r = new NetRule { Action = cmd.Action.Value, Count = 3, EveryMs = 50 };
+        if (r.Action == RuleAction.Duplicate)
+        {
+            if (args.Count > 0 && int.TryParse(args[0], out var n)) r.Count = Math.Clamp(n, 1, 100);
+            if (args.Count > 1 && int.TryParse(args[1], out var ms)) r.EveryMs = Math.Clamp(ms, 0, 60_000);
+        }
+        else if (r.Action == RuleAction.Modify)
+        {
+            r.Modify = string.Join(";", args);
+            if (args.Count == 0) { ImGuiRenderer.ShowToast("network", "/modify needs Field=value", 2.5f); return false; }
+        }
+        r.SetTokens(tokens);
+        NetActive.Rules.Add(r);
+        ImGuiRenderer.ShowToast("network", $"rule: {r.Filter} → {r.ActionLabel}", 2.5f);
+        return true;
     }
 
     private static void Replace(ImGuiInputTextCallbackDataPtr data, string text)

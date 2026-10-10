@@ -36,7 +36,22 @@ internal static class NetCapture
     private static long _keptBytes;
 
     public static long TotalIn, TotalOut, BytesIn, BytesOut;
+    /// <summary>Bytes seen on the wire, counted even while paused (the traffic graph); any thread.</summary>
+    public static long WireIn, WireOut;
     public static bool Paused;
+
+    // What the next packet the send hook sees is (set right before our own ClientSendMessage; the
+    // hook runs synchronously on the same thread): a copy, a custom one, or not captured at all.
+    [ThreadStatic] private static PacketMark _nextMark;
+    [ThreadStatic] private static bool _skipNext;
+
+    public static void MarkNext(PacketMark mark) => _nextMark = mark;
+    public static void SkipNext() => _skipNext = true;
+    /// <summary>After our own send: a flag the hook didn't consume (an early return) must not label the next packet.</summary>
+    public static void ClearNext() { _nextMark = PacketMark.None; _skipNext = false; }
+
+    /// <summary>The client's current tick, for rows made by hand.</summary>
+    public static uint TickOf(object manager) => CurrentTick(manager);
 
     private static object? _timing;
 
@@ -113,14 +128,16 @@ internal static class NetCapture
 
     public static void Install()
     {
+        Hooks.Prefix(Owner, Engine.NetCoreSend, nameof(SendPrefix), typeof(NetCapture));
         Hooks.Transpiler(Owner, Engine.NetCoreSend, nameof(SendTranspiler), typeof(NetCapture));
         Hooks.Transpiler(Owner, Engine.NetDispatch, nameof(RecvTranspiler), typeof(NetCapture));
     }
 
     // ── hooks ────────────────────────────────────────────────────────────────────────────────
 
-    // ... var packet = BuildMessage(message, channel);  → + OnSend(packet, message, this)
-    private static IEnumerable<CodeInstruction> SendTranspiler(IEnumerable<CodeInstruction> instructions)
+    // ... var packet = BuildMessage(message, channel);
+    //     → if (!OnSend(packet, message, this)) return;   (the packet is left on the stack: popped)
+    private static IEnumerable<CodeInstruction> SendTranspiler(IEnumerable<CodeInstruction> instructions, ILGenerator generator)
     {
         var onSend = AccessTools.Method(typeof(NetCapture), nameof(OnSend));
         var list   = instructions.ToList();
@@ -128,18 +145,26 @@ internal static class NetCapture
                                          && c.operand is MethodInfo { Name: "BuildMessage" });
         if (at < 0) throw new InvalidOperationException("BuildMessage call not found in CoreSendMessage");
 
+        // The instruction after BuildMessage (stloc packet) gets a label: the "go on" branch. The
+        // label must come from the generator: a `new Label()` is index 0, i.e. the method's own first label.
+        var goOn = generator.DefineLabel();
+        list[at + 1].labels.Add(goOn);
         list.InsertRange(at + 1,
         [
             new CodeInstruction(OpCodes.Dup),        // packet
             new CodeInstruction(OpCodes.Ldarg_2),    // message
             new CodeInstruction(OpCodes.Ldarg_0),    // NetManager
             new CodeInstruction(OpCodes.Call, onSend),
+            new CodeInstruction(OpCodes.Brtrue, goOn),
+            new CodeInstruction(OpCodes.Pop),        // the packet: not sent
+            new CodeInstruction(OpCodes.Ret),
         ]);
         return list;
     }
 
-    // ... entry.Callback!.Invoke(instance);  → OnRecv(instance, msg) just before
-    private static IEnumerable<CodeInstruction> RecvTranspiler(IEnumerable<CodeInstruction> instructions)
+    // ... try { entry.Callback!.Invoke(instance); } catch … ; return true;
+    //     → if (!OnRecv(instance, msg, this)) goto after the try (return true), skipping the handler
+    private static IEnumerable<CodeInstruction> RecvTranspiler(IEnumerable<CodeInstruction> instructions, ILGenerator generator)
     {
         var onRecv = AccessTools.Method(typeof(NetCapture), nameof(OnRecv));
         var list   = instructions.ToList();
@@ -147,26 +172,54 @@ internal static class NetCapture
                                          && c.operand is MethodInfo { Name: "Invoke" } m
                                          && m.DeclaringType?.Name == "ProcessMessage");
         if (at < 0) throw new InvalidOperationException("ProcessMessage.Invoke not found in DispatchNetMessage");
+        // Inside a try block the only way out is `leave`: reuse the target of the try's own leave,
+        // the `return true` after the handler.
+        var leave = list.FindIndex(at, c => c.opcode == OpCodes.Leave || c.opcode == OpCodes.Leave_S);
+        if (leave < 0 || list[leave].operand is not Label after)
+            throw new InvalidOperationException("leave after ProcessMessage.Invoke not found in DispatchNetMessage");
 
+        var goOn = generator.DefineLabel();
+        list[at].labels.Add(goOn);
         list.InsertRange(at,
         [
             new CodeInstruction(OpCodes.Dup),        // message (top of the stack)
             new CodeInstruction(OpCodes.Ldarg_1),    // NetIncomingMessage
             new CodeInstruction(OpCodes.Ldarg_0),    // NetManager
             new CodeInstruction(OpCodes.Call, onRecv),
+            new CodeInstruction(OpCodes.Brtrue, goOn),
+            new CodeInstruction(OpCodes.Pop),        // the message
+            new CodeInstruction(OpCodes.Pop),        // the callback
+            new CodeInstruction(OpCodes.Leave, after),
         ]);
         return list;
     }
 
-    // Both run inside the engine's send/receive path: never throw (a throw here would lose the
+    // Both run inside the engine's send/receive path (on the client: the main thread, OnSend in the
+    // caller of ClientSendMessage, OnRecv in the input phase's ProcessPackets): never throw (a throw here would lose the
     // message), keep it cheap (no ToString; the only reflection walk is the bounded entity scan
-    // of MsgEntity events in Add).
-    private static void OnSend(object packet, object message, object manager)
+    // of MsgEntity events in Add). They return false when a rule stops the packet (NetActive.Apply).
+    // Before the engine serialises: a modify rule changes the object here, so the bytes built next
+    // carry the change and the packet keeps its place in the order (re-sending it later would let
+    // messages sent in between overtake it). Nothing else happens before the packet exists.
+    private static void SendPrefix(object[] __args)
     {
         try
         {
-            if (Paused) return;
-            Add(new Packet
+            if (_skipNext || __args.Length < 2 || __args[1] is not { } message) return;
+            NetActive.ModifyBeforeSend(message);
+        }
+        catch (Exception ex)
+        {
+            Hooks.Fail(Owner, "send-prefix", ex);
+        }
+    }
+
+    private static bool OnSend(object packet, object message, object manager)
+    {
+        try
+        {
+            if (_skipNext) { _skipNext = false; return true; }   // a release: already in the log
+            return Add(new Packet
             {
                 Dir      = NetDir.Out,
                 Type     = message.GetType(),
@@ -181,14 +234,14 @@ internal static class NetCapture
         catch (Exception ex)
         {
             Hooks.Fail(Owner, "send", ex);
+            return true;
         }
     }
 
-    private static void OnRecv(object message, object raw, object manager)
+    private static bool OnRecv(object message, object raw, object manager)
     {
         try
         {
-            if (Paused) return;
             var p = new Packet
             {
                 Dir      = NetDir.In,
@@ -200,11 +253,12 @@ internal static class NetCapture
                 Tick     = CurrentTick(manager),
                 Message  = message,
             };
-            Add(p);
+            return Add(p);
         }
         catch (Exception ex)
         {
             Hooks.Fail(Owner, "receive", ex);
+            return true;
         }
     }
 
@@ -249,18 +303,31 @@ internal static class NetCapture
     public static void Pin(long seq)
     {
         lock (_lock)
-            if (_ring[seq % _ring.Length] is { } p && p.Seq == seq) p.Pinned = true;
+            if (_ring[seq % _ring.Length] is { } p && p.Seq == seq) p.Pins++;
     }
 
-    /// <summary>Lets the packet go again; dropped now if the budget already passed it by.</summary>
+    /// <summary>Pins a packet that may not be in the log (frozen while paused).</summary>
+    public static void Pin(Packet p)
+    {
+        lock (_lock) p.Pins++;
+    }
+
+    /// <summary>Lets the packet go again; dropped now if the budget already passed it by and no one else holds it.</summary>
     public static void Unpin(long seq)
     {
         lock (_lock)
-        {
-            if (_ring[seq % _ring.Length] is not { } p || p.Seq != seq) return;
-            p.Pinned = false;
-            if (p.Untracked) Drop(p);
-        }
+            if (_ring[seq % _ring.Length] is { } p && p.Seq == seq) UnpinLocked(p);
+    }
+
+    public static void Unpin(Packet p)
+    {
+        lock (_lock) UnpinLocked(p);
+    }
+
+    private static void UnpinLocked(Packet p)
+    {
+        if (p.Pins > 0) p.Pins--;
+        if (p.Pins == 0 && p.Untracked) Drop(p);
     }
 
     /// <summary>Lets go of every message object (feature switched off); headers and summaries stay.</summary>
@@ -276,15 +343,30 @@ internal static class NetCapture
         }
     }
 
-    /// <summary>Records a packet (any thread). Exposed for tests.</summary>
-    internal static void Add(Packet p)
+    /// <summary>
+    /// Records a packet (any thread) and runs the active rules on it; false when a rule stops it
+    /// (the caller then doesn't send / deliver it). Exposed for tests.
+    /// </summary>
+    internal static bool Add(Packet p)
     {
         p.Stamp = Stopwatch.GetTimestamp();
+        if (_nextMark != PacketMark.None)
+        {
+            // Sent by us: marked so, and left alone by the rules.
+            p.Mark = _nextMark;
+            p.Ours = true;
+            _nextMark = PacketMark.None;
+            if (p.Mark == PacketMark.Custom) Interlocked.Increment(ref NetActive.CustomCount);
+        }
         if (p.Message is not null && p.Type.Name == "MsgEntity")
         {
             p.Inner    = NetDecode.InnerType(p.Message);
             p.Entities = NetDecode.EntityIds(p.Message);
         }
+        if (!p.Ours) NetActive.Learn(p);
+        Interlocked.Add(ref p.Dir == NetDir.In ? ref WireIn : ref WireOut, p.Size);
+        // Paused: nothing is logged, but the rules still act (pause means "stop writing", not "stop").
+        if (Paused) return NetActive.Apply(p);
         lock (_lock)
         {
             p.Seq = _nextSeq++;
@@ -295,16 +377,15 @@ internal static class NetCapture
 
             // Memory: forget old message objects, and all but the newest few game states.
             // Their one-line summary is made first: it can't be made without the object.
-            if (p.Message is null) return;
+            if (p.Message is null) goto done;
             if (p.Type.Name == "MsgState")
             {
                 _states.Enqueue(p);
                 if (_states.Count > KeepStates) Drop(_states.Dequeue());
-                return;
+                goto done;
             }
             _kept.Enqueue(p);
             _keptBytes += p.Size;
-            // Packets overwritten in the ring are the oldest, so they leave from the front too.
             while (_kept.Count > 0 && (_keptBytes > KeepBytes || _kept.Count > Math.Min(_ring.Length, KeepCount)
                                        || _kept.Peek().Seq <= p.Seq - _ring.Length))
             {
@@ -313,5 +394,7 @@ internal static class NetCapture
                 Drop(old);
             }
         }
+        done:
+        return NetActive.Apply(p);
     }
 }

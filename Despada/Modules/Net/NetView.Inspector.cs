@@ -11,10 +11,11 @@ using ImGuiNET;
 
 namespace Despada.Modules.Net;
 
-// The inspector: packets opened with a double or middle click, Ctrl+Enter (or the menu) are pills in the tab's second row,
-// after a "packets" pill for the list. The active one takes the whole tab: header, fields, related
-// packets, bytes. Ctrl+click or a middle click on a pill closes it. Open packets are pinned, so
-// their message and bytes stay however old they get.
+// The inspector: packets opened with Ctrl+Shift+click, Ctrl+Enter or the menu are tabs in
+// the second row. The active one takes the whole body: header, fields, related packets, bytes, and
+// a footer (↑ send again · × N every M ms · pencil). The pencil turns the fields into controls
+// (✓ keeps the changes on this tab, ✗ drops them); an edited packet shows its draft and sends that.
+// Open packets are pinned, so their message and bytes stay however old they get.
 internal static partial class NetView
 {
     private const int MaxDocs = 8;
@@ -27,7 +28,11 @@ internal static partial class NetView
     private static FieldNode? _docTree;
     private static List<(Packet Packet, string Why)>? _related;
     private static long _relatedAt;
-    private static List<(string Offset, string Hex, string Ascii)>? _docHex;
+
+    // Editing: the draft being edited and whose; accepted edits, per packet.
+    private static PacketDraft? _editing;
+    private static long _editingSeq = -1;
+    private static readonly Dictionary<long, PacketDraft> _edited = new();
 
     private static bool IsDoc(long seq) => _docs.Contains(seq);
 
@@ -40,6 +45,28 @@ internal static partial class NetView
             NetCapture.Pin(seq);
         }
         _activeDoc = seq;
+        _tabKind = TabKind.Packet;
+    }
+
+    /// <summary>Opens the packet and starts editing it.</summary>
+    public static void EditDoc(long seq)
+    {
+        OpenDoc(seq);
+        BeginEdit();
+    }
+
+    private static void BeginEdit()
+    {
+        var p = ActiveDoc();
+        if (p is null) return;
+        var d = _edited.TryGetValue(p.Seq, out var e) ? e.Clone() : PacketDraft.From(p);
+        if (d is null)
+        {
+            ImGuiRenderer.ShowToast("network", "no longer kept: nothing to edit", 2f);
+            return;
+        }
+        _editing = d;
+        _editingSeq = p.Seq;
     }
 
     private static void CloseDoc(long seq)
@@ -48,15 +75,18 @@ internal static partial class NetView
         if (i < 0) return;
         _docs.RemoveAt(i);
         NetCapture.Unpin(seq);
+        _edited.Remove(seq);
+        if (_editingSeq == seq) { _editing = null; _editingSeq = -1; }
         if (seq == _docTreeSeq)
         {
             // Its tree holds the message object.
             _docTreeSeq = -1;
             _docTree = null;
             _related = null;
-            _docHex = null;
+            ForgetStream();
         }
         if (_activeDoc == seq) _activeDoc = _docs.Count == 0 ? -1 : _docs[Math.Min(i, _docs.Count - 1)];
+        if (_activeDoc < 0 && _tabKind == TabKind.Packet) ShowList();
     }
 
     /// <summary>The active packet, if it's still in the buffer (closes the ones that aren't).</summary>
@@ -75,59 +105,16 @@ internal static partial class NetView
             NetCapture.Unpin(seq);
         _docs.Clear();
         _activeDoc = -1;
+        _edited.Clear();
+        _editing = null;
+        _editingSeq = -1;
+        _drafts.Clear();
+        _activeDraft = null;
+        ShowList();
         _docTreeSeq = -1;
         _docTree = null;
         _related = null;
-        _docHex = null;
-    }
-
-    private static void DrawDocPills()
-    {
-        _pillsMin = _pillsMax = Vector2.Zero;
-        if (_docs.Count == 0) return;
-        ImGuiNET.ImGui.SameLine(0f, 14f * D);
-        var y  = ImGuiNET.ImGui.GetCursorPosY();
-        var dl = ImGuiNET.ImGui.GetWindowDrawList();
-        var p0 = ImGuiNET.ImGui.GetCursorScreenPos();
-        Gfx.VLine(dl, p0.X, p0.Y + 8f * D, p0.Y + ImGuiNET.ImGui.GetFrameHeight() - 8f * D, Theme.ToU32(Theme.P.Sep));
-        // An item for the line, so the next SameLine counts from it (not again from the counters).
-        ImGuiNET.ImGui.Dummy(new Vector2(1f, ImGuiNET.ImGui.GetFrameHeight()));
-        ImGuiNET.ImGui.SameLine(0f, 14f * D);
-
-        // A powerline: "packets" (the list), then the open packets (Alt+1, Alt+2 …). Too many for the
-        // row: names shorten, then the rest go under "…".
-        var names = new List<string>(_docs.Count + 1) { "packets" };
-        foreach (var seq in _docs)
-            names.Add(NetCapture.Get(seq) is { } p ? $"#{seq} {Short(p.Inner ?? p.Type.Name)}" : $"#{seq}");
-        var active = _activeDoc < 0 ? 0 : _docs.IndexOf(_activeDoc) + 1;
-        var labels = Powerline.Fit(names, active, ImGuiNET.ImGui.GetContentRegionAvail().X - 12f * D,
-            out var from, out var to);
-
-        _pillsMin = ImGuiNET.ImGui.GetCursorScreenPos();
-        long close = -1;
-        for (var i = from; i <= to; i++)
-        {
-            if (i > from) Powerline.Next();
-            ImGuiNET.ImGui.SetCursorPosY(y);
-            var seq = i == 0 ? -1 : _docs[i - 1];
-            if (Powerline.Segment(i == 0 ? "##docs-list" : $"##doc{seq}", labels[i], seq == _activeDoc, i == from,
-                    false, out var closeRequested))
-                _activeDoc = seq;
-            // Ctrl+click on the list's segment just selects it: the list can't be closed.
-            if (closeRequested)
-            {
-                if (seq < 0) _activeDoc = -1;
-                else         close = seq;
-            }
-        }
-        if (from > 0 || to < names.Count - 1)
-        {
-            var picked = Powerline.Overflow("##docs-more", names, active);
-            if (picked >= 0) _activeDoc = picked == 0 ? -1 : _docs[picked - 1];
-        }
-        _pillsMax = ImGuiNET.ImGui.GetItemRectMax();
-        ImGuiNET.ImGui.NewLine();
-        if (close >= 0) CloseDoc(close);
+        ForgetStream();
     }
 
     /// <summary>The open packet <paramref name="seq"/> becomes <paramref name="next"/>, in the same tab.</summary>
@@ -140,6 +127,7 @@ internal static partial class NetView
         }
         var i = _docs.IndexOf(seq);
         if (i < 0) return;
+        if (_editingSeq == seq) CancelEdit();
         NetCapture.Unpin(seq);
         _docs[i] = next;
         NetCapture.Pin(next);
@@ -158,27 +146,38 @@ internal static partial class NetView
         {
             _docTreeSeq = p.Seq;
             _docTree = NetDecode.Root(p);
-            if (_docTree.CanExpand)
-                foreach (var c in NetDecode.Children(_docTree))
-                    c.Expanded = c.CanExpand && c.Depth <= 1 && c.Value?.GetType().Name is not "GameState";
+            ExpandDefault(_docTree, 1);
             _related = null;
-            _docHex = p.Bytes is { } b ? NetDecode.HexLines(b).Take(64).ToList() : null;
+            _selField = null;
         }
         var bytes = p.Bytes;
-        if (bytes is null) _docHex = null;
+        if (bytes is not null) EnsureStream(p, bytes);   // before the head reads its counts
+        _hoverField = _hoverFieldNext;
+        _hoverRow   = _hoverRowNext;
+        _hoverFieldNext = _hoverRowNext = null;
 
-        // Styles are read by BeginChild; popped right away so the menu inside gets the usual ones.
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.ChildBg, Theme.P.Deep);
-        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, Theme.SmallRounding);
-        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(18f * D, 14f * D));
-        ImGuiNET.ImGui.BeginChild("##inspector", new Vector2(width, height), ImGuiChildFlags.AlwaysUseWindowPadding,
-            ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.HorizontalScrollbar);
-        ImGuiNET.ImGui.PopStyleVar(2);
-        ImGuiNET.ImGui.PopStyleColor();
-        SmoothScroll.Update();
-        ApplyInspectorScroll();
+        var editing = _editing is not null && _editingSeq == p.Seq ? _editing : null;
+        var edited  = editing is null && _edited.TryGetValue(p.Seq, out var ed) ? ed : null;
+
+        BeginPanel("##inspector", width, height);
 
         // Header: #4512 ↑ MsgEntity · RequestInteractEvent, then time · size · tick · delivery.
+        // Its right end: "editing · N changed", or "edited · N changed  revert"; a long title is
+        // clipped before it (the tag and the button stay reachable however narrow the window).
+        var rv  = "revert";
+        var tag = editing is not null ? (editing.ChangedCount > 0 ? $"editing · {editing.ChangedCount} changed" : "editing")
+                : edited is not null  ? $"edited · {edited.ChangedCount} changed   " : null;
+        var tagW    = tag is null ? 0f : ImGuiNET.ImGui.CalcTextSize(tag).X
+                    + (edited is not null ? ImGuiNET.ImGui.CalcTextSize(rv).X + 2f * ImGuiNET.ImGui.GetStyle().FramePadding.X : 0f);
+        var headTop = ImGuiNET.ImGui.GetCursorPos();
+        var right   = headTop.X + ImGuiNET.ImGui.GetContentRegionAvail().X;
+        var dl      = ImGuiNET.ImGui.GetWindowDrawList();
+        var clipped = tag is not null;
+        if (clipped)
+        {
+            var sp = ImGuiNET.ImGui.GetCursorScreenPos();
+            dl.PushClipRect(sp, new Vector2(sp.X + right - tagW - 2f * ImGuiNET.ImGui.CalcTextSize("M").X - headTop.X, sp.Y + ImGuiNET.ImGui.GetTextLineHeight()), true);
+        }
         Text($"#{p.Seq}  ", Theme.P.Fg);
         Text(p.Dir == NetDir.In ? "↓ " : "↑ ", p.Dir == NetDir.In ? Theme.P.Accent : Theme.P.Accent2);
         Text(p.Type.Name, Theme.P.Fg);
@@ -187,15 +186,41 @@ internal static partial class NetView
             Text("  ·  ", Theme.P.Muted);
             Text(p.Inner, Theme.P.Accent2);
         }
+        if (clipped) dl.PopClipRect();
         ImGuiNET.ImGui.NewLine();
         Text($"{NetFeature.Time(p)} · {NetFeature.Bytes(p.Size)} · tick {p.Tick} · {Delivery(p.Delivery)}" +
              (p.Channel != 0 ? $" · channel {p.Channel}" : ""), Theme.P.Muted);
         ImGuiNET.ImGui.NewLine();
-
-        if (Section("fields", null, ref _showFields))
+        if (tag is not null)
         {
-            if (_docTree is { CanExpand: true })
-                DrawTree(p.Seq, NetDecode.Children(_docTree), ImGuiNET.ImGui.GetCursorScreenPos().X - 2f * ImGuiNET.ImGui.CalcTextSize("M").X, 1, 0);
+            ImGuiNET.ImGui.SetCursorPos(new Vector2(right - tagW, headTop.Y));
+            Text(tag, editing is not null ? Theme.P.Yellow : Theme.P.Accent2);
+            if (edited is not null)
+            {
+                if (ImGuiNET.ImGui.SmallButton(rv)) _edited.Remove(p.Seq);
+            }
+            ImGuiNET.ImGui.NewLine();
+        }
+        ImGuiNET.ImGui.SetCursorPosY(headTop.Y + ImGuiNET.ImGui.GetTextLineHeightWithSpacing() * 2f);
+
+        // Two columns when the bytes pane is open and there is room: fields and related at the
+        // left, the bytes at the right. Folded (or narrow), one column with the bytes line last.
+        var twoCols = bytes is not null && ImGuiNET.ImGui.GetContentRegionAvail().X >= 700f * D;
+        var bodyH   = -FooterHeight();
+        var leftW   = twoCols ? MathF.Floor(ImGuiNET.ImGui.GetContentRegionAvail().X * 0.53f) : -1f;
+
+        ImGuiNET.ImGui.BeginChild("##insp-body", new Vector2(leftW, bodyH), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollWithMouse);
+        SmoothScroll.Update();
+        ApplyInspectorScroll();
+
+        if (Section("fields", editing is not null ? "editing" : edited is not null ? "edited" : null, ref _showFields))
+        {
+            if (editing is not null)
+                DrawDraftRows(editing, editable: true);
+            else if (edited is not null)
+                DrawDraftRows(edited, editable: false);
+            else if (_docTree is { CanExpand: true })
+                DrawFieldTable(p.Seq, _docTree);
             else
             {
                 Text(p.Message is null ? "no longer kept" : "—", Theme.P.Muted);
@@ -221,37 +246,68 @@ internal static partial class NetView
             EndSection();
         }
 
-        // Collapsed, the bytes line still shows the size and how the packet starts.
-        var bytesInfo = bytes is null ? null : NetFeature.Bytes(bytes.Length);
-        var bytesHead = bytes is null ? null
-            : $"{bytesInfo}  ·  {string.Join(' ', bytes.Take(8).Select(b => b.ToString("x2")))}{(bytes.Length > 8 ? " …" : "")}";
-        if (Section("bytes", bytesInfo, ref _showBytes, bytesHead))
+        if (!twoCols)
         {
-            if (_docHex is null)
-            {
-                Text("no longer kept", Theme.P.Muted);
-                ImGuiNET.ImGui.NewLine();
-            }
-            else
-                foreach (var (offset, hex, ascii) in _docHex)
-                {
-                    Text(offset + "  ", Theme.P.Muted);
-                    Text(hex + " ", Theme.P.Sub);
-                    Text(ascii, Theme.P.Muted);
-                    ImGuiNET.ImGui.NewLine();
-                }
-            if (_docHex is not null && bytes is { Length: > 1024 })
-            {
-                Text($"… {bytes.Length - 1024:N0} more bytes", Theme.P.Muted);
-                ImGuiNET.ImGui.NewLine();
-            }
-            EndSection();
+            BytesHead(bytes, withSwitch: true);
+            ImGuiNET.ImGui.Indent(2f * ImGuiNET.ImGui.CalcTextSize("M").X);
+            DrawBytesBody(p, bytes);
+            ImGuiNET.ImGui.Unindent(2f * ImGuiNET.ImGui.CalcTextSize("M").X);
         }
 
         DrawMenu();
         ImGuiNET.ImGui.EndChild();
-        _bodyMin = ImGuiNET.ImGui.GetItemRectMin();
-        _bodyMax = ImGuiNET.ImGui.GetItemRectMax();
+
+        if (twoCols)
+        {
+            ImGuiNET.ImGui.SameLine(0f, 0f);
+            var sepX = ImGuiNET.ImGui.GetCursorScreenPos().X + 10f * D;
+            var sepY = ImGuiNET.ImGui.GetCursorScreenPos().Y;
+            Gfx.VLine(ImGuiNET.ImGui.GetWindowDrawList(), sepX, sepY + 8f * D, sepY + ImGuiNET.ImGui.GetContentRegionAvail().Y + bodyH - 8f * D, Theme.ToU32(Theme.P.Sep));
+            ImGuiNET.ImGui.SameLine(0f, 22f * D);
+            ImGuiNET.ImGui.BeginChild("##insp-bytes", new Vector2(-1f, bodyH), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollWithMouse);
+            SmoothScroll.Update();
+            BytesHead(bytes, withSwitch: true);
+            DrawBytesBody(p, bytes);
+            ImGuiNET.ImGui.EndChild();
+        }
+
+        // The footer: send again (the draft when edited), repeat, and the mode's buttons.
+        var action = DrawFooter(editing is not null ? FooterMode.Edit : FooterMode.View, p.Dir);
+        switch (action)
+        {
+            case FooterAction.Send:
+                if (editing is not null) NetActive.Send(editing, _sendTimes, _sendEveryMs);
+                else if (edited is not null) NetActive.Send(edited, _sendTimes, _sendEveryMs);
+                else NetActive.Resend(p, _sendTimes, _sendEveryMs);
+                break;
+            case FooterAction.Edit:   BeginEdit(); break;
+            case FooterAction.Accept: AcceptEdit(); break;
+            case FooterAction.Cancel: CancelEdit(); break;
+        }
+        ImGuiNET.ImGui.EndChild();
+    }
+
+    private static void AcceptEdit()
+    {
+        if (_editing is null) return;
+        if (_editing.ChangedCount > 0) _edited[_editingSeq] = _editing;
+        else _edited.Remove(_editingSeq);
+        _editing = null;
+        _editingSeq = -1;
+    }
+
+    private static void CancelEdit()
+    {
+        _editing = null;
+        _editingSeq = -1;
+    }
+
+    /// <summary>Saves the open packet (its edited draft when it has one) under a name.</summary>
+    private static void SaveDoc(Packet p)
+    {
+        var d = _edited.TryGetValue(p.Seq, out var e) ? e : PacketDraft.From(p);
+        if (d is null) { ImGuiRenderer.ShowToast("network", "no longer kept: nothing to save", 2f); return; }
+        SaveDraft(d);
     }
 
     private static void DrawRelated()
@@ -341,7 +397,7 @@ internal static partial class NetView
     }
 
     // Sections fold with a click on their caption; folding is kept across packets.
-    private static bool _showFields = true, _showRelated = true, _showBytes;
+    private static bool _showFields = true, _showRelated = true;
 
     /// <summary>"▾ caption  info" line; true (and indented) when the section is open.</summary>
     /// <param name="closedInfo">Shown instead of <paramref name="info"/> while the section is folded.</param>

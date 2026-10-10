@@ -14,8 +14,21 @@ public sealed class RequestInteractEvent { public NetEntity Target = new(1873); 
 public sealed class MsgChatMessage { public string Text = "who took the jaws?"; public int[] Recipients = [1, 2, 3]; }
 public sealed class RequestPerformActionEvent { public NetEntity? EntityTarget = new NetEntity(77); public NetEntity? None; }
 public sealed class MsgLobbyInfo { public string TextBlob = "Welcome to [color=white]Space Station 14![/color]\nRound: #65\nPlayers: 1"; }
+public struct FakeVector2 { public float X; public float Y; }
+public struct FakeCoordinates { public NetEntity NetEntity; public FakeVector2 Position; }
+public enum FakeHand { Left, Right }
+public sealed class FakeInteractDraftEvent
+{
+    public NetEntity Target = new(1873);
+    public bool AltInteract;
+    public FakeHand Hand = FakeHand.Right;
+    public FakeCoordinates Coordinates = new() { NetEntity = new NetEntity(2), Position = new FakeVector2 { X = 12.5f, Y = -3.25f } };
+    public int[] Tags = [1, 2];
+    public NetEntity? Maybe;
+}
 public sealed class MsgState { }
 public sealed class MsgStateAck { }
+public sealed class MsgStateLeavePvs { }
 public sealed class MsgEntity { }
 
 public class NetQueryTests
@@ -207,7 +220,7 @@ public class NetCaptureTests
         NetCapture.Capacity = 5000;
         NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Message = new MsgChatMessage(), Bytes = [1, 2] });
         var pinned = NetCapture.Get(NetCapture.LastSeq)!;
-        pinned.Pinned = true;
+        pinned.Pins = 1;
         NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Size = (int)NetCapture.KeepBytes + 1, Message = new object() });
         Assert.NotNull(pinned.Message);
         Assert.NotNull(pinned.Bytes);
@@ -335,5 +348,378 @@ public class NetDecodeTests
         Assert.False(found.ContainsKey("FakeStorageMessage"));   // a BUI message is not listed as an event
         Assert.False(found.ContainsKey("FakeWrapMessage"));      // only carries one
         Assert.False(found.ContainsKey("FakeNetMessage"));   // abstract
+    }
+
+    [Fact]
+    public void DraftFromAPacketMirrorsItsFields()
+    {
+        var p = new Packet { Type = typeof(FakeInteractDraftEvent), Dir = NetDir.Out, Message = new FakeInteractDraftEvent(), Seq = 7 };
+        var d = PacketDraft.From(p)!;
+        Assert.Equal("FakeInteractDraftEvent", d.TypeName);
+        Assert.Equal(NetDir.Out, d.Dir);
+        var byPath = d.Walk().ToDictionary(x => x.Path, x => x.Field);
+        Assert.Equal(DraftKind.Entity, byPath["Target"].Kind);
+        Assert.Equal("1873", byPath["Target"].Value);
+        Assert.Equal(DraftKind.Bool, byPath["AltInteract"].Kind);
+        Assert.Equal(DraftKind.Enum, byPath["Hand"].Kind);
+        Assert.Equal(["Left", "Right"], byPath["Hand"].Options);
+        Assert.Equal("Right", byPath["Hand"].Value);
+        Assert.Equal(DraftKind.Number, byPath["Coordinates.Position.X"].Kind);   // nested structs unfold
+        Assert.Equal("12.5", byPath["Coordinates.Position.X"].Value);
+        Assert.Equal(DraftKind.Readonly, byPath["Tags"].Kind);                   // collections aren't edited
+        Assert.Equal(DraftKind.Entity, byPath["Maybe"].Kind);
+        Assert.Equal("", byPath["Maybe"].Value);                                  // a nullable: empty = null
+        Assert.Equal(0, d.ChangedCount);
+
+        byPath["Target"].Value = "22";
+        Assert.Equal([("Target", "22")], d.Changes());
+        var copy = d.Clone();
+        copy.Walk().First(x => x.Path == "Target").Field.Value = "5";
+        Assert.Equal("22", byPath["Target"].Value);                              // the clone is its own
+    }
+
+    [Fact]
+    public void SavedPacketsRoundTrip()
+    {
+        var p = new Packet { Type = typeof(FakeInteractDraftEvent), Dir = NetDir.Out, Message = new FakeInteractDraftEvent() };
+        var d = PacketDraft.From(p)!;
+        d.Walk().First(x => x.Path == "Hand").Field.Value = "Left";
+        var saved = SavedPacket.FromDraft(d, "test");
+        Assert.Equal("Left", saved.Values["Hand"]);
+        var dto  = saved.ToDto();
+        var back = SavedPacket.FromDto(dto);
+        Assert.Equal("test", back.Name);
+        Assert.Equal(NetDir.Out, back.Dir);
+        Assert.Equal("Left", back.Values["Hand"]);
+    }
+
+    [Fact]
+    public void RulesMatchWithTheListsQueryLanguage()
+    {
+        var r = new NetRule { Action = RuleAction.Freeze };
+        r.SetFilter("dir:in type:MsgChat");
+        var chat = new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Summary = "" };
+        var ack  = new Packet { Type = typeof(MsgStateAck), Dir = NetDir.Out, Summary = "" };
+        Assert.True(r.Matches(chat));
+        Assert.False(r.Matches(ack));
+        r.Enabled = false;
+        Assert.False(r.Matches(chat));
+        Assert.Equal("freeze", r.ActionLabel);
+        var empty = new NetRule();
+        empty.SetFilter("   ");
+        Assert.False(empty.Matches(chat));   // no filter never means "everything"
+    }
+
+    [Fact]
+    public void RulesActOnlyWhenArmed_AndFirstMatchWins()
+    {
+        NetActive.Reset();
+        NetActive.Rules.Clear();
+        NetActive.BlockedCount = 0;
+        var block  = new NetRule { Action = RuleAction.Block };  block.SetFilter("type:MsgChat");
+        var freeze = new NetRule { Action = RuleAction.Freeze }; freeze.SetFilter("dir:in");
+        NetActive.Rules.Add(block);
+        NetActive.Rules.Add(freeze);
+        Packet Chat() => new() { Type = typeof(MsgChatMessage), Dir = NetDir.In, Summary = "" };
+        Packet Ack()  => new() { Type = typeof(MsgEntity), Dir = NetDir.In, Summary = "" };   // (state packets are guarded)
+
+        Assert.True(NetActive.Apply(Chat()));                 // not armed: everything passes
+        NetActive.Armed = true;
+        var c = Chat();
+        Assert.False(NetActive.Apply(c));                     // the block rule comes first
+        Assert.Equal(PacketMark.Blocked, c.Mark);
+        Assert.Equal(1, block.Hits);
+        Assert.Equal(1, NetActive.BlockedCount);
+        var a = Ack();
+        Assert.False(NetActive.Apply(a));                     // only the freeze rule matches
+        Assert.Equal(PacketMark.Frozen, a.Mark);
+        Assert.Equal([a], NetActive.FrozenSnapshot());
+        var ours = Chat(); ours.Ours = true;
+        Assert.True(NetActive.Apply(ours));                   // our own packets never trigger rules
+        Assert.Equal(PacketMark.None, ours.Mark);
+        NetActive.Drop(a);
+        Assert.Empty(NetActive.FrozenSnapshot());
+        Assert.Equal(PacketMark.Blocked, a.Mark);
+        NetActive.Reset();
+        Assert.False(NetActive.Armed);
+    }
+
+    [Fact]
+    public void ModifyRuleChangesTheObjectBeforeItIsBuilt()
+    {
+        NetActive.Reset();
+        NetActive.Rules.Clear();
+        var r = new NetRule { Action = RuleAction.Modify, Modify = "Hand=left; AltInteract=true" }; r.SetFilter("type:RequestInteract");
+        NetActive.Rules.Add(r);
+        NetActive.Armed = true;
+        try
+        {
+            var ev = new RequestInteractEvent();
+            // The prefix, before the engine serialises: the object changes in place.
+            NetActive.ModifyBeforeSend(ev);
+            Assert.Equal("left", ev.Hand);
+            Assert.True(ev.AltInteract);
+            // The capture after BuildMessage: the packet goes on (its bytes already carry the change), marked.
+            var p = new Packet { Type = typeof(RequestInteractEvent), Dir = NetDir.Out, Message = ev, Summary = "" };
+            Assert.True(NetActive.Apply(p));
+            Assert.Equal(PacketMark.Edited, p.Mark);
+            Assert.Null(r.Error);
+            // A bad path is remembered on the rule, the packet still passes.
+            var bad = new NetRule { Action = RuleAction.Modify, Modify = "Nope=1" }; bad.SetFilter("type:RequestInteract");
+            NetActive.Rules.Insert(0, bad);
+            NetActive.ModifyBeforeSend(new RequestInteractEvent());
+            Assert.Contains("Nope", bad.Error);
+        }
+        finally
+        {
+            NetActive.Reset();
+            NetActive.Rules.Clear();
+        }
+    }
+
+    [Fact]
+    public void RulesWithUnknownTokensAreOff_AndStateGuardCoversAllStateMessages()
+    {
+        NetActive.Reset();
+        NetActive.Rules.Clear();
+        var typo = new NetRule { Action = RuleAction.Block }; typo.SetFilter("dir:up");
+        Assert.True(typo.Invalid);
+        NetActive.Rules.Add(typo);
+        NetActive.Armed = true;
+        try
+        {
+            Assert.True(NetActive.Apply(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.Out, Summary = "" }));
+            var all = new NetRule { Action = RuleAction.Block }; all.SetFilter("dir:in");
+            NetActive.Rules.Add(all);
+            Assert.True(NetActive.Apply(new Packet { Type = typeof(MsgStateLeavePvs), Dir = NetDir.In, Summary = "" }));   // MsgState* guarded
+            Assert.False(NetActive.Apply(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Summary = "" }));
+        }
+        finally
+        {
+            NetActive.Reset();
+            NetActive.Rules.Clear();
+        }
+    }
+
+    [Fact]
+    public void PinsAreCounted_AnInspectorTabClosingKeepsAFrozenPacket()
+    {
+        NetCapture.Clear();
+        NetCapture.Capacity = 5000;
+        NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Message = new MsgChatMessage(), Bytes = [1, 2] });
+        var p = NetCapture.Get(NetCapture.LastSeq)!;
+        NetCapture.Pin(p);          // frozen
+        NetCapture.Pin(p.Seq);      // opened in the inspector
+        NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Size = (int)NetCapture.KeepBytes + 1, Message = new object() });
+        NetCapture.Unpin(p.Seq);    // the tab closes
+        Assert.NotNull(p.Message);  // still frozen: kept
+        NetCapture.Unpin(p);        // released
+        Assert.Null(p.Message);
+    }
+
+    [Fact]
+    public void AddReturnsWhetherThePacketGoesOn()
+    {
+        NetCapture.Clear();
+        NetCapture.Capacity = 1000;
+        NetActive.Rules.Clear();
+        var r = new NetRule { Action = RuleAction.Block }; r.SetFilter("type:MsgChat");
+        NetActive.Rules.Add(r);
+        NetActive.Armed = true;
+        Assert.False(NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.Out, Size = 1, Message = new MsgChatMessage() }));
+        Assert.True(NetCapture.Add(new Packet { Type = typeof(MsgState), Dir = NetDir.In, Size = 1, Message = new MsgState() }));
+        Assert.Equal(2, NetCapture.Count);                    // a blocked packet is still in the log
+        NetActive.Reset();
+        NetActive.Rules.Clear();
+    }
+
+    [Fact]
+    public void StatePacketsPassBlockAndFreeze_UnlessUnsafe()
+    {
+        var r = new NetRule { Action = RuleAction.Block };
+        r.SetFilter("dir:in");
+        var state = new Packet { Type = typeof(MsgState), Dir = NetDir.In, Summary = "" };
+        var chat  = new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Summary = "" };
+        Assert.False(r.Matches(state));
+        Assert.True(r.Matches(chat));
+        r.SetFilter("dir:in !unsafe");
+        Assert.True(r.Unsafe);
+        Assert.True(r.Matches(state));
+        Assert.Equal("dir:in !unsafe", r.Filter);
+        var dup = new NetRule { Action = RuleAction.Duplicate };
+        dup.SetFilter("type:MsgState");
+        Assert.True(dup.Matches(state));   // only block and freeze are guarded
+        var hint = new NetRule { Action = RuleAction.Freeze };
+        hint.SetFilter("type:MsgState");
+        Assert.True(hint.WouldSkipState);
+    }
+
+    [Fact]
+    public void ScheduledSendsRespectTheRateLimit()
+    {
+        NetActive.Reset();
+        NetActive.Armed = true;
+        NetActive.RateLimit = 3;
+        var runs = 0;
+        NetActive.Schedule(5, 0, () => runs++);
+        NetActive.Pump();
+        Assert.Equal(3, runs);                 // the limit within one second
+        NetActive.Pump();
+        Assert.Equal(3, runs);                 // the rest wait for the next window
+        NetActive.Armed = false;
+        NetActive.Pump();                      // disarmed: pending sends are dropped
+        NetActive.Armed = true;
+        NetActive.RateLimit = 20;
+        NetActive.Pump();
+        Assert.Equal(3, runs);
+        NetActive.Reset();
+    }
+
+    [Fact]
+    public void OurPacketsAreMarkedAndSkipTheRules()
+    {
+        NetCapture.Clear();
+        NetCapture.Capacity = 1000;
+        NetActive.Rules.Clear();
+        var r = new NetRule { Action = RuleAction.Block }; r.SetFilter("type:MsgChat");
+        NetActive.Rules.Add(r);
+        NetActive.Armed = true;
+        NetActive.CustomCount = 0;
+        NetCapture.MarkNext(PacketMark.Custom);
+        Assert.True(NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.Out, Size = 1, Message = new MsgChatMessage() }));
+        var p = NetCapture.Get(NetCapture.LastSeq)!;
+        Assert.True(p.Ours);
+        Assert.Equal(PacketMark.Custom, p.Mark);
+        Assert.Equal(1, NetActive.CustomCount);
+        Assert.False(NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.Out, Size = 1, Message = new MsgChatMessage() }));   // the mark was one-shot
+        NetActive.Reset();
+        NetActive.Rules.Clear();
+    }
+
+    [Fact]
+    public void DuplicateRuleMarksTheOriginal_AndQueuesTheCopies()
+    {
+        NetActive.Reset();
+        NetActive.Rules.Clear();
+        var r = new NetRule { Action = RuleAction.Duplicate, Count = 3, EveryMs = 1000 };
+        r.SetFilter("type:MsgChat");
+        NetActive.Rules.Add(r);
+        NetActive.Armed = true;
+        var p = new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.Out, Size = 9, Message = new MsgChatMessage(), Summary = "" };
+        Assert.True(NetActive.Apply(p));                      // the original goes on
+        Assert.Equal(PacketMark.Duplicated, p.Mark);
+        Assert.Equal(3, p.MarkCount);
+        Assert.Equal(3, NetActive.PendingSends);               // the copies wait for their time
+        NetActive.Pump();
+        Assert.Equal(3, NetActive.PendingSends);               // not due yet (a second away)
+        NetActive.Reset();
+        Assert.Equal(0, NetActive.PendingSends);
+        NetActive.Rules.Clear();
+    }
+
+    [Fact]
+    public void DraftBuildsBackIntoAnObject()
+    {
+        var src = new FakeInteractDraftEvent();
+        var p = new Packet { Type = typeof(FakeInteractDraftEvent), Dir = NetDir.Out, Message = src, Seq = 1 };
+        var d = PacketDraft.From(p)!;
+        d.FromSeq = -1;   // not in the capture: a new instance from the draft's values
+        var f = d.Walk().ToDictionary(x => x.Path, x => x.Field);
+        f["Target"].Value = "22";
+        f["AltInteract"].Value = "true";
+        f["Hand"].Value = "left";
+        f["Coordinates.Position.X"].Value = "7.5";
+        f["Maybe"].Value = "9";
+        var built = (FakeInteractDraftEvent)DraftBuilder.Build(d, out var wrap);
+        Assert.False(wrap);
+        Assert.NotSame(src, built);
+        Assert.Equal(22, built.Target.Id);
+        Assert.True(built.AltInteract);
+        Assert.Equal(FakeHand.Left, built.Hand);
+        Assert.Equal(7.5f, built.Coordinates.Position.X);
+        Assert.Equal(-3.25f, built.Coordinates.Position.Y);   // the struct's other field kept
+        Assert.Equal(2, built.Coordinates.NetEntity.Id);
+        Assert.Equal(9, built.Maybe!.Value.Id);
+        Assert.Equal(src.Tags, built.Tags);                  // read-only fields come from the draft's source? no: a new instance keeps its own default
+    }
+
+    [Fact]
+    public void DraftFromACapturedPacketCopiesIt()
+    {
+        NetCapture.Clear();
+        NetCapture.Capacity = 1000;
+        var src = new FakeInteractDraftEvent { Tags = [7, 8, 9] };
+        NetCapture.Add(new Packet { Type = typeof(FakeInteractDraftEvent), Dir = NetDir.Out, Message = src, Size = 1 });
+        var p = NetCapture.Get(NetCapture.LastSeq)!;
+        var d = PacketDraft.From(p)!;
+        d.Walk().First(x => x.Path == "Target").Field.Value = "22";
+        var built = (FakeInteractDraftEvent)DraftBuilder.Build(d, out _);
+        Assert.NotSame(src, built);
+        Assert.Equal(22, built.Target.Id);
+        Assert.Equal(1873, src.Target.Id);                   // the captured object is untouched
+        Assert.Equal([7, 8, 9], built.Tags);                 // fields the editor can't show are copied
+    }
+
+    [Fact]
+    public void FieldsAreSetByPath_AndBadValuesAreReported()
+    {
+        var o = new FakeInteractDraftEvent();
+        Assert.True(DraftBuilder.TrySet(o, "Coordinates.Position.Y", "1.25", out _));
+        Assert.Equal(1.25f, o.Coordinates.Position.Y);
+        Assert.True(DraftBuilder.TrySet(o, "Hand", "Left", out _));
+        Assert.Equal(FakeHand.Left, o.Hand);
+        Assert.True(DraftBuilder.TrySet(o, "Target", "5", out _));
+        Assert.Equal(5, o.Target.Id);
+        Assert.False(DraftBuilder.TrySet(o, "Target", "abc", out var err));
+        Assert.Contains("Target", err);
+        Assert.False(DraftBuilder.TrySet(o, "Nope", "1", out err));
+        Assert.Contains("no field", err);
+    }
+
+    [Fact]
+    public void FrozenPacketsKeepTheirMessage_AndRulesActWhilePaused()
+    {
+        NetCapture.Clear();
+        NetCapture.Capacity = 1000;
+        NetActive.Reset();
+        NetActive.Rules.Clear();
+        var r = new NetRule { Action = RuleAction.Freeze }; r.SetFilter("type:MsgChat");
+        NetActive.Rules.Add(r);
+        NetActive.Armed = true;
+        Assert.False(NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Size = 1, Message = new MsgChatMessage() }));
+        var frozen = NetActive.FrozenSnapshot().Single();
+        Assert.True(frozen.Pinned);
+        // The budget passes it by: the message stays while it's frozen.
+        NetCapture.Add(new Packet { Type = typeof(MsgEntity), Size = (int)NetCapture.KeepBytes + 1, Message = new object() });
+        Assert.NotNull(frozen.Message);
+        NetActive.Drop(frozen);
+        Assert.Null(frozen.Message);                              // released from the budget on drop
+
+        try
+        {
+            NetCapture.Paused = true;
+            var count = NetCapture.Count;
+            Assert.False(NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Size = 1, Message = new MsgChatMessage() }));
+            Assert.Equal(count, NetCapture.Count);                // not logged, but still frozen
+            Assert.Single(NetActive.FrozenSnapshot());
+        }
+        finally
+        {
+            NetCapture.Paused = false;
+            NetActive.Reset();
+            NetActive.Rules.Clear();
+        }
+    }
+
+    [Fact]
+    public void DirectionIsLearnedFromTraffic_NotFromOurOwnPackets()
+    {
+        NetCapture.Clear();
+        NetCapture.Capacity = 1000;
+        NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.Out, Size = 1, Message = new MsgChatMessage() });
+        Assert.Equal(NetDir.Out, NetActive.DirectionOf("MsgChatMessage"));
+        NetCapture.MarkNext(PacketMark.Copy);
+        NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Size = 1, Message = new MsgChatMessage() });
+        Assert.Equal(NetDir.Out, NetActive.DirectionOf("MsgChatMessage"));   // a delivery to ourselves doesn't count
     }
 }
