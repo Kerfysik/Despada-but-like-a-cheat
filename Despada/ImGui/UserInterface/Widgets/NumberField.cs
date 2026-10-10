@@ -36,6 +36,14 @@ public static partial class Widgets
     /// </summary>
     public static bool NumberField(string id, ref float value, float min, float max, float step, string? label = null,
         string? unit = null, float width = 150f, int decimals = 0, float layoutW = 0f)
+        => NumberField(id, ref value, min, max, step, label, unit, width, decimals, layoutW, false);
+
+    /// <summary>
+    /// <paramref name="frameless"/>: no box, no ‹ ›, 12 px side padding — a half of a shared box
+    /// (the repeat control) whose frame the caller draws.
+    /// </summary>
+    private static bool NumberField(string id, ref float value, float min, float max, float step, string? label,
+        string? unit, float width, int decimals, float layoutW, bool frameless)
     {
         var pos   = ImGuiNET.ImGui.GetCursorScreenPos();
         var size  = new Vector2(width, NumberH);
@@ -92,27 +100,32 @@ public static partial class Widgets
         var focus = Animate(itemId ^ 0x55u, editing, 24f);
         var min0  = UiScale.Snap(pos);
         var max0  = UiScale.Snap(pos + size);
-        dl.AddRectFilled(min0, max0, Theme.ToU32(Theme.P.Deep), ButtonRound);
-        dl.AddRect(min0, max0, Theme.ToU32(Theme.Mix(Theme.Hairline, Theme.HairlineHot, hot)), ButtonRound, ImDrawFlags.None, 1f / UiScale.K);
-        Gfx.FocusRing(dl, min0, max0, ButtonRound, focus);
+        if (!frameless)
+        {
+            dl.AddRectFilled(min0, max0, Theme.ToU32(Theme.P.Deep), ButtonRound);
+            dl.AddRect(min0, max0, Theme.ToU32(Theme.Mix(Theme.Hairline, Theme.HairlineHot, hot)), ButtonRound, ImDrawFlags.None, 1f / UiScale.K);
+            Gfx.FocusRing(dl, min0, max0, ButtonRound, focus);
+        }
+        _numberHot = MathF.Max(hot, focus);
 
         var cy = pos.Y + size.Y * 0.5f;
         var textY = cy - lineH * 0.5f;
         // ‹ › appear on hover, never while typing.
-        var arrowA = hot * (1f - focus);
+        var arrowA = frameless ? 0f : hot * (1f - focus);
         if (arrowA > 0.01f)
         {
             var ac = Theme.ToU32(Theme.WithAlpha(Theme.P.Sub, arrowA));
             dl.AddText(new Vector2(pos.X + NumberPadX + 2f, textY), ac, "‹");
             dl.AddText(new Vector2(pos.X + size.X - NumberPadX - NumberArrowW + 4f, textY), ac, "›");
         }
-        var left = pos.X + NumberPadX + NumberArrowW;
+        var inset = frameless ? 12f : NumberPadX + NumberArrowW;
+        var left  = pos.X + inset;
         if (label is not null)
         {
             dl.AddText(new Vector2(left, textY), Theme.ToU32(Theme.P.Muted), label);
             left += ImGuiNET.ImGui.CalcTextSize(label).X + 8f;
         }
-        var right = pos.X + size.X - NumberPadX - NumberArrowW;
+        var right = pos.X + size.X - inset;
         if (unit is not null)
         {
             var uw = ImGuiNET.ImGui.CalcTextSize(unit).X;
@@ -180,24 +193,46 @@ public static partial class Widgets
     public static bool Repeat(string id, ref int times, ref int everyMs)
     {
         var pos = ImGuiNET.ImGui.GetCursorScreenPos();
+        var dl  = ImGuiNET.ImGui.GetWindowDrawList();
+        var cw  = ImGuiNET.ImGui.CalcTextSize("0").X;
+        // "× NN" and "NNNN ms", each 12 px padding, 6 px between label and value.
+        var timesW = 12f + ImGuiNET.ImGui.CalcTextSize("×").X + 8f + cw * 2f + 12f;
+        var msFull = 12f + cw * 4f + 6f + ImGuiNET.ImGui.CalcTextSize("ms").X + 12f;
+
         ImGuiNET.ImGui.PushID(id);
         var baseId = ImGuiNET.ImGui.GetID("##rep");
-        var changed = NumberField("##times", ref times, 1, 99, 1, "×", null, 104f);
-        var open = Animate(baseId, times >= 2, 18f);
-        var msW = 130f * open;
+        var open   = Animate(baseId, times >= 2, 18f);
+        var msW    = msFull * open;
+        var size   = new Vector2(timesW + msW, NumberH);
+        var min0   = UiScale.Snap(pos);
+        var max0   = UiScale.Snap(pos + size);
+        // One box for both halves; its outline is drawn after them so it can light on hover.
+        dl.AddRectFilled(min0, max0, Theme.ToU32(Theme.P.Deep), ButtonRound);
+
+        float ft = times, fe = everyMs;
+        var changed = NumberField("##times", ref ft, 1, 99, 1, "×", null, timesW, 0, 0f, true);
+        if (changed) times = (int)ft;
+        var hot = _numberHot;
         if (open > 0.01f)
         {
             ImGuiNET.ImGui.SameLine(0f, 0f);
             var at = ImGuiNET.ImGui.GetCursorScreenPos();
             // While sliding: the window clip rect, so drawing AND hit-testing stop at the open
-            // width (a draw-list clip would leave the hidden part clickable). A margin for the
-            // focus glow.
+            // width (a draw-list clip would leave the hidden part clickable).
             var sliding = open < 0.999f;
-            if (sliding) ImGuiNET.ImGui.PushClipRect(at - new Vector2(4f, 4f), new Vector2(at.X + msW, at.Y + NumberH + 4f), true);
-            changed |= NumberField("##every", ref everyMs, 1, 5000, 10, null, "ms", 130f, sliding ? MathF.Max(1f, msW) : 0f);
+            if (sliding) ImGuiNET.ImGui.PushClipRect(at, new Vector2(at.X + msW, at.Y + NumberH), true);
+            if (NumberField("##every", ref fe, 1, 5000, 10, null, "ms", msFull, 0, sliding ? MathF.Max(1f, msW) : 0f, true)) { everyMs = (int)fe; changed = true; }
             if (sliding) ImGuiNET.ImGui.PopClipRect();
+            hot = MathF.Max(hot, _numberHot);
+            // The divider: a 20 px hairline between the halves.
+            var dx = UiScale.Snap(new Vector2(at.X, 0f)).X;
+            dl.AddLine(new Vector2(dx, pos.Y + (NumberH - 20f) * 0.5f), new Vector2(dx, pos.Y + (NumberH + 20f) * 0.5f),
+                Theme.ToU32(Theme.WithAlpha(Theme.Hairline, Theme.Hairline.W * open)), 1f / UiScale.K);
         }
+        dl.AddRect(min0, max0, Theme.ToU32(Theme.Mix(Theme.Hairline, Theme.HairlineHot, hot)), ButtonRound, ImDrawFlags.None, 1f / UiScale.K);
         ImGuiNET.ImGui.PopID();
         return changed;
     }
+
+    private static float _numberHot;   // the last number field's hover/focus ease, for a shared frame
 }

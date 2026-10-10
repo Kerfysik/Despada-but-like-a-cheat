@@ -20,21 +20,28 @@ public static partial class Widgets
     public static void Sparkline(ImDrawListPtr dl, Vector2 min, Vector2 max, ReadOnlySpan<float> samples, float scale,
         Vector4 color, bool flip = false, float phase = 0f)
     {
-        var n = samples.Length;
-        if (n < 2) return;
+        var count = samples.Length;
+        if (count < 2) return;
         var w = max.X - min.X;
         var h = max.Y - min.Y;
-        // One step wider than the box: the newest sample slides in from beyond the right edge and
-        // the oldest leaves on the left, so no gap opens at the end between samples.
-        var step = w / (n - 2);
+        // As the ags traffic widget: the samples span the box one step to the right (the newest
+        // slides in from beyond the right edge as the phase grows, the oldest leaves on the left),
+        // and flat spare points past both edges (three left, one right) keep the curve and its
+        // fill seamless at the clip — no notch where the spline would otherwise start or end.
+        const int leftSpares = 3, rightSpares = 1;
+        var step  = w / (count - 1);
         var shift = step * phase;
+        var n     = count + leftSpares + rightSpares;
         Span<Vector2> pts = stackalloc Vector2[n];
-        for (var i = 0; i < n; i++)
+        for (var i = 0; i < count; i++)
         {
             var v = scale <= 0f ? 0f : Math.Clamp(samples[i] / scale, 0f, 1f);
             var y = 0.08f + 0.86f * v;
-            pts[i] = new Vector2(min.X + i * step - shift, flip ? min.Y + y * h : max.Y - y * h);
+            pts[leftSpares + i] = new Vector2(min.X + (i + 1) * step - shift, flip ? min.Y + y * h : max.Y - y * h);
         }
+        for (var j = 1; j <= leftSpares; j++)
+            pts[leftSpares - j] = new Vector2(pts[leftSpares].X - step * j, pts[leftSpares].Y);
+        pts[n - 1] = new Vector2(pts[n - 2].X + step, pts[n - 2].Y);
 
         // Catmull-Rom → cubic Bézier, 6 segments per span; the control y is clamped to the span.
         const int seg = 6;

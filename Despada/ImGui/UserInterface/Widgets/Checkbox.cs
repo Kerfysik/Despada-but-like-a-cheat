@@ -10,7 +10,7 @@ namespace Despada.ImGui.UserInterface;
 
 public static partial class Widgets
 {
-    private const float CheckboxSize  = 22f;
+    public  const float CheckboxSize  = 22f;
     private const float CheckboxRound = 6f;
 
     /// <summary>

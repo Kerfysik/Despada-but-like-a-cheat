@@ -94,14 +94,28 @@ public static partial class Widgets
                 LineAt(dl, c, u, col, thickness, -7f, 0f, 7f, 0f);
                 break;
             case Icon.Gear:
-                dl.AddCircle(c, 3f * u, col, 12, thickness);
-                for (var i = 0; i < 8; i++)
+            {
+                // Eight teeth: the outline alternates between the outer and the inner radius,
+                // each tooth a little narrower at its tip; the hub is a ring.
+                const int teeth = 8;
+                const float ro = 8.5f, ri = 6.2f;
+                var half = MathF.PI / teeth;
+                for (var i = 0; i < teeth; i++)
                 {
-                    var a = i * MathF.PI / 4f;
-                    var (sn, cs) = MathF.SinCos(a);
-                    dl.AddLine(c + new Vector2(cs, sn) * 5.5f * u, c + new Vector2(cs, sn) * 8f * u, col, thickness);
+                    var a = i * 2f * half;
+                    var (s0, c0) = MathF.SinCos(a - half * 0.42f);
+                    var (s1, c1) = MathF.SinCos(a + half * 0.42f);
+                    var (s2, c2) = MathF.SinCos(a + half * 0.62f);
+                    var (s3, c3) = MathF.SinCos(a + half * 1.38f);
+                    dl.PathLineTo(c + new Vector2(c0, s0) * ro * u);
+                    dl.PathLineTo(c + new Vector2(c1, s1) * ro * u);
+                    dl.PathLineTo(c + new Vector2(c2, s2) * ri * u);
+                    dl.PathLineTo(c + new Vector2(c3, s3) * ri * u);
                 }
+                dl.PathStroke(col, ImDrawFlags.Closed, thickness);
+                dl.AddCircle(c, 2.6f * u, col, 12, thickness);
                 break;
+            }
             case Icon.Dots:
                 for (var i = -1; i <= 1; i++) dl.AddCircleFilled(P(i * 6f, 0f), 1.8f * u, col);
                 break;
