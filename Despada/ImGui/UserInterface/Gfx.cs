@@ -52,6 +52,51 @@ internal static unsafe class Gfx
         dl.AddRectFilled(new Vector2(left, UiScale.Snap(y0)), new Vector2(left + 1f / UiScale.K, UiScale.Snap(y1)), col);
     }
 
+    /// <summary>
+    /// A raised control surface (v2 widgets): the fill, a hairline outline and a one-pixel highlight
+    /// along the top edge, inset so it follows the rounding.
+    /// </summary>
+    public static void Raised(ImDrawListPtr dl, Vector2 min, Vector2 max, float rounding, Vector4 fill, Vector4 border, bool hilite = true)
+    {
+        // On the pixel grid, or a one-pixel border smears over two rows.
+        min = UiScale.Snap(min);
+        max = UiScale.Snap(max);
+        dl.AddRectFilled(min, max, Theme.ToU32(fill), rounding);
+        if (hilite)
+        {
+            var inset = MathF.Max(1f, rounding * 0.6f);
+            HLine(dl, min.X + inset, max.X - inset, min.Y + 1f, Theme.ToU32(Theme.Hilite));
+        }
+        if (border.W > 0f)
+            dl.AddRect(min, max, Theme.ToU32(border), rounding, ImDrawFlags.None, 1f / UiScale.K);
+    }
+
+    /// <summary>Focus: the accent ring at <paramref name="t"/> plus a 3 px glow fading outwards.</summary>
+    public static void FocusRing(ImDrawListPtr dl, Vector2 min, Vector2 max, float rounding, float t)
+    {
+        if (t <= 0.01f) return;
+        var glow = Theme.FocusGlow;
+        for (var i = 1; i <= 3; i++)
+        {
+            var a = glow.W * t * (1f - (i - 1) / 3f);
+            dl.AddRect(min - new Vector2(i, i), max + new Vector2(i, i), Theme.ToU32(Theme.WithAlpha(glow, a)), rounding + i, ImDrawFlags.None, 1f);
+        }
+        dl.AddRect(min, max, Theme.ToU32(Theme.WithAlpha(Theme.FocusRing, Theme.FocusRing.W * t)), rounding, ImDrawFlags.None, 1f / UiScale.K);
+    }
+
+    /// <summary>A soft drop shadow under a popup: a few expanding rects fading out.</summary>
+    public static void Shadow(ImDrawListPtr dl, Vector2 min, Vector2 max, float rounding, float spread = 14f, float alpha = 0.35f)
+    {
+        var steps = 6;
+        for (var i = steps; i >= 1; i--)
+        {
+            var d = spread * i / steps;
+            var a = alpha * (1f - (float)i / (steps + 1)) / steps * 2.2f;
+            // Offset downwards: the shadow starts a little below the top edge and reaches further below.
+            dl.AddRectFilled(min + new Vector2(-d, d * 0.2f), max + new Vector2(d, d * 1.2f), Theme.ToU32(Theme.WithAlpha(Theme.P.Shadow, a)), rounding + d);
+        }
+    }
+
     /// <summary>Rounded rect filled with a horizontal gradient.</summary>
     public static void GradientRect(ImDrawListPtr dl, Vector2 min, Vector2 max, Vector4 left, Vector4 right, float rounding)
     {

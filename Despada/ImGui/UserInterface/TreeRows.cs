@@ -27,6 +27,32 @@ internal static class TreeRows
         _            => Theme.P.Fg,
     };
 
+    /// <summary>
+    /// The guide lines of one row (rows of other heights, e.g. a draft editor's, draw these and
+    /// their own content). One-pixel hairlines on the framebuffer grid; segments end where ImGui
+    /// puts the next row (it truncates the cursor), so joins neither gap nor overlap (a doubled
+    /// pixel of the translucent colour would look dotted). The elbow's vertical ends where its
+    /// horizontal starts, at the middle of the first <paramref name="lineH"/>.
+    /// </summary>
+    public static void Guides(ImDrawListPtr dl, float x0, int depth, uint guides, bool last, float y, float rowH, float lineH)
+    {
+        if (depth <= 0) return;
+        var cw   = ImGuiNET.ImGui.CalcTextSize("M").X;
+        var step = cw * 2f;
+        var col  = Theme.ToU32(Theme.P.Sep);
+        var end  = MathF.Floor(y + rowH);
+        float Gx(int level) => x0 + level * step + cw * 0.5f;
+
+        for (var l = 0; l < Math.Min(depth - 1, 32); l++)
+            if ((guides & (1u << l)) != 0)
+                Gfx.VLine(dl, Gx(l), y, end, col);
+
+        var gx  = Gx(depth - 1);
+        var mid = y + lineH * 0.5f;
+        Gfx.VLine(dl, gx, y, last ? mid : end, col);
+        Gfx.HLine(dl, gx, gx + step - cw * 0.7f, mid, col);
+    }
+
     /// <param name="id">Stable ImGui id for the row's toggle.</param>
     /// <param name="x0">Left edge of depth 0.</param>
     /// <param name="guides">Bit l set: an ancestor's guide line passes through this row at level l.</param>
@@ -41,24 +67,7 @@ internal static class TreeRows
         var cw    = ImGuiNET.ImGui.CalcTextSize("M").X;
         var step  = cw * 2f;
 
-        if (depth > 0)
-        {
-            // One-pixel hairlines on the framebuffer grid; segments end where ImGui puts the next row
-            // (it truncates the cursor), so joins neither gap nor overlap (a doubled pixel of the
-            // translucent colour would look dotted). The elbow's vertical ends where its horizontal starts.
-            var col = Theme.ToU32(Theme.P.Sep);
-            var end = MathF.Floor(pos.Y + rowH);
-            float Gx(int level) => x0 + level * step + cw * 0.5f;
-
-            for (var l = 0; l < Math.Min(depth - 1, 32); l++)
-                if ((guides & (1u << l)) != 0)
-                    Gfx.VLine(dl, Gx(l), pos.Y, end, col);
-
-            var gx  = Gx(depth - 1);
-            var mid = pos.Y + lineH * 0.5f;
-            Gfx.VLine(dl, gx, pos.Y, last ? mid : end, col);
-            Gfx.HLine(dl, gx, gx + step - cw * 0.7f, mid, col);
-        }
+        Guides(dl, x0, depth, guides, last, pos.Y, rowH, lineH);
 
         var x     = x0 + depth * step;
         var textX = isNode ? x + step : x;

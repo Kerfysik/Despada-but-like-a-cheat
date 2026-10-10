@@ -548,53 +548,30 @@ internal static unsafe class ConsolePanel
         return matches;
     }
 
+    private static (string, string)[] _sugBuf = new (string, string)[8];
+
     private static void DrawSuggestions(ConsoleSession s)
     {
         var text    = s.Input;
         var matches = SuggestionsFor(text);
         if (matches.Count == 0) return;
         var sel = Math.Clamp(_sugIndex, 0, matches.Count - 1);
-
-        var dl     = ImGuiNET.ImGui.GetWindowDrawList();
+        
         var winPos = ImGuiNET.ImGui.GetWindowPos();
         var winSz  = ImGuiNET.ImGui.GetWindowSize();
-        var padY   = 4f * D;
-        var padX   = 12f * D;
-        var rowH   = ImGuiNET.ImGui.GetTextLineHeight() + padY * 2f;
-        var nameW  = matches.Max(m => ImGuiNET.ImGui.CalcTextSize(m.Name).X) + 24f * D;
-        var descW  = matches.Max(m => ImGuiNET.ImGui.CalcTextSize(m.Description).X);
-        var size   = new Vector2(MathF.Min(nameW + descW + padX * 2f, winSz.X - 20f * D), rowH * matches.Count);
-        var min    = new Vector2(winPos.X + 4f * D, winPos.Y + winSz.Y - size.Y - 4f * D);
-        // Box on the framebuffer grid: the 1 px outline's straight runs then sit on one pixel row.
-        var boxMax = UiScale.Snap(min + size);
-        min  = UiScale.Snap(min);
-        size = boxMax - min;
-        var r      = Theme.SmallRounding;
-
-        dl.AddRectFilled(min, min + size, Theme.ToU32(Theme.P.Pop), r);
-
-        // The highlighted row fills its whole row; at the box's top/bottom it follows the box corners.
-        var hlFlags = matches.Count == 1 ? ImDrawFlags.RoundCornersAll
-                    : sel == 0 ? ImDrawFlags.RoundCornersTop
-                    : sel == matches.Count - 1 ? ImDrawFlags.RoundCornersBottom
-                    : ImDrawFlags.RoundCornersNone;
-        var hlMin = new Vector2(min.X, min.Y + rowH * sel);
-        var vtx = dl.VtxBuffer.Size;
-        dl.AddRectFilled(hlMin, new Vector2(min.X + size.X, hlMin.Y + rowH), Theme.ToU32(Theme.Sel), r, hlFlags);
-        Gfx.Shade(dl, vtx, dl.VtxBuffer.Size, hlMin, new Vector2(min.X + size.X, hlMin.Y),
-            Theme.ToU32(Theme.Sel), Theme.ToU32(Theme.SelR));
-
-        for (var i = 0; i < matches.Count; i++)
+        if (_sugBuf.Length < matches.Count) _sugBuf = new (string, string)[matches.Count];
+        for (var i = 0; i < matches.Count; i++) _sugBuf[i] = (matches[i].Name, matches[i].Description);
+        var h   = Widgets.CompletionRowH * matches.Count + Widgets.CompletionPad * 2f;
+        var bar = ImGuiNET.ImGui.GetScrollMaxX() > 0f ? ImGuiNET.ImGui.GetStyle().ScrollbarSize : 0f;
+        var at  = new Vector2(winPos.X + 4f * D, winPos.Y + winSz.Y - bar - h - 4f * D);
+        Widgets.Completions(ImGuiNET.ImGui.GetWindowDrawList(), at, _sugBuf.AsSpan(0, matches.Count), sel, text, out _, out _, out var hover, shadow: false);
+        // A click on a row takes it, as Tab would.
+        if (hover >= 0 && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Left))
         {
-            var y    = min.Y + rowH * i + padY;
-            var x    = min.X + padX;
-            var name = matches[i].Name;
-            dl.AddText(new Vector2(x, y), Theme.ToU32(Theme.P.Accent2), name[..text.Length]);
-            dl.AddText(new Vector2(x + ImGuiNET.ImGui.CalcTextSize(name[..text.Length]).X, y), Theme.ToU32(Theme.P.Fg), name[text.Length..]);
-            dl.AddText(new Vector2(x + nameW, y), Theme.ToU32(i == sel ? Theme.P.Sub : Theme.P.Muted), matches[i].Description);
+            s.Input = matches[hover].Name + " ";
+            _sugIndex = 0;
+            RequestFocus();
         }
-
-        dl.AddRect(min, min + size, Theme.ToU32(Theme.P.Sep), r, ImDrawFlags.None, 1f / UiScale.K);
     }
 
     private static int InputCallback(ImGuiInputTextCallbackData* raw)

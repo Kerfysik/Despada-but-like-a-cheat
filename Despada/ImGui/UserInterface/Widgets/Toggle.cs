@@ -9,40 +9,37 @@ namespace Despada.ImGui.UserInterface;
 
 public static partial class Widgets
 {
-    private const float ToggleW     = 46f;
+    private const float ToggleW     = 44f;
     private const float ToggleH     = 24f;
     private const float KnobR       = 9f;
     private const float KnobPad     = 3f;
     private const float ToggleSpeed = 20f;
 
+    // v2: the track is a hairline Deep pill when off and the plain accent when on; the knob is a
+    // Sub disc that becomes ink on the accent, and it springs across rather than easing.
     private static void DrawToggleAt(ImDrawListPtr dl, Vector2 pos, bool value, bool hovered, uint id)
     {
-        var t = Animate(id, value);
+        var t   = Animate(id, value);
+        var hot = Animate(id ^ 0x33u, hovered, 24f);
 
         var min    = pos;
         var max    = new Vector2(pos.X + ToggleW, pos.Y + ToggleH);
         var radius = ToggleH * 0.5f;
 
-        var offColor = hovered ? Theme.Mix(Theme.P.Raised, Theme.P.Sep, 0.5f) : Theme.P.Raised;
-        var onColor  = hovered ? Theme.P.Accent : Theme.WithAlpha(Theme.P.Accent, 0.75f);
+        var off = Theme.Mix(Theme.RaisedFill, Theme.RaisedHot, hot);
+        dl.AddRectFilled(min, max, Theme.ToU32(Theme.Mix(off, Theme.P.Accent, t)), radius);
+        if (t < 0.99f)
+            dl.AddRect(UiScale.Snap(min), UiScale.Snap(max), Theme.ToU32(Theme.WithAlpha(Theme.Hairline, Theme.Hairline.W * (1f - t))), radius, ImDrawFlags.None, 1f / UiScale.K);
+        Gfx.HLine(dl, min.X + radius * 0.6f, max.X - radius * 0.6f, min.Y + 1f, Theme.ToU32(Theme.WithAlpha(Theme.Hilite, Theme.Hilite.W * (1f - t))));
 
-        dl.AddRectFilled(min, max, Theme.ToU32(Theme.Mix(offColor, onColor, t)), radius);
-
-        if (t > 0.01f)
-        {
-            var gradAlpha = t * 0.25f;
-            // Over the whole rounded track: a rect inset by the radius left a seam where the caps begin.
-            Gfx.GradientRect(dl, min, max, Theme.WithAlpha(Theme.P.Accent, gradAlpha),
-                Theme.WithAlpha(Theme.P.Accent2, gradAlpha), radius);
-        }
-
+        // The spring runs on 0..1, not on screen x: the knob must not trail the track when the
+        // window is dragged.
         var knobOff = min.X + KnobR + KnobPad;
         var knobOn  = max.X - KnobR - KnobPad;
-        var knobX   = knobOff + (knobOn - knobOff) * t;
-
-        var knobAlpha = 0.4f + 0.6f * t;
-        var knobColor = Theme.WithAlpha(Theme.P.Fg, knobAlpha);
-        dl.AddCircleFilled(new Vector2(knobX, min.Y + ToggleH * 0.5f), KnobR, Theme.ToU32(knobColor));
+        var s       = SpringTo(id ^ 0x44u, value ? 1f : 0f, 800f, 0.72f);
+        var knobC   = new Vector2(knobOff + (knobOn - knobOff) * s, min.Y + ToggleH * 0.5f);
+        dl.AddCircleFilled(knobC + new Vector2(0f, 1f), KnobR, Theme.ToU32(Theme.WithAlpha(Theme.P.Shadow, 0.35f)));
+        dl.AddCircleFilled(knobC, KnobR, Theme.ToU32(Theme.Mix(Theme.P.Sub, Theme.Ink, t)));
     }
 
     public static bool Toggle(string id, ref bool value)

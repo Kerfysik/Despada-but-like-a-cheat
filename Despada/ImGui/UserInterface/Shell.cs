@@ -48,8 +48,12 @@ public static class Shell
         Widgets.ResetFrame();
         ConsolePanel.InputActive = false;
 
+        // Keyboard policy: the shown section declares the keys it listens for every frame
+        // (ImGuiInputHook.Want) and gets them wherever the mouse is, no click needed; every other
+        // key plays the game. An active text field (the console) takes them all.
+
         var display = ImGuiNET.ImGui.GetIO().DisplaySize;
-        var size    = Vector2.Min(new Vector2(1000f * D, 632f * D), display);
+        var size    = Vector2.Min(new Vector2(1100f * D, 800f * D), display);
         ImGuiNET.ImGui.SetNextWindowSize(size, ImGuiCond.Always);
         if (_winPos is { } last)
         {

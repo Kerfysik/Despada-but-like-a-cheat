@@ -31,7 +31,8 @@ internal static class Powerline
     /// label (new output in an inactive session); it sits in the right padding, so a tab keeps its
     /// width when the dot comes or goes.
     /// </summary>
-    public static bool Segment(string id, string label, bool active, bool first, bool mark, out bool closeRequested)
+    public static bool Segment(string id, string label, bool active, bool first, bool mark, out bool closeRequested,
+        Vector4? tone = null)
     {
         closeRequested = false;
 
@@ -64,7 +65,7 @@ internal static class Powerline
             Gfx.Shade(dl, start, dl.VtxBuffer.Size, pos, pos + new Vector2(w, 0f),
                 Theme.ToU32(Theme.P.Accent), Theme.ToU32(Theme.P.Accent2));
 
-        var text = active ? new Vector4(Theme.P.Glass, 1f) : hovered ? Theme.P.Fg : Theme.P.Sub;
+        var text = active ? new Vector4(Theme.P.Glass, 1f) : hovered ? Theme.P.Fg : tone ?? Theme.P.Sub;
         var ty   = pos.Y + (h - ImGuiNET.ImGui.GetFontSize()) * 0.5f;
         dl.AddText(new Vector2(pos.X + padL, ty), Theme.ToU32(text), label);
         if (mark)

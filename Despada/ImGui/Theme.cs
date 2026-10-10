@@ -27,6 +27,10 @@ public sealed class Palette
     public required Vector4 Yellow;
     public required Vector4 Red;
     public required Vector4 Shadow;
+    // Catppuccin surface steps: raised controls, their hover and outlines (v2 widgets).
+    public required Vector4 Surface0;
+    public required Vector4 Surface1;
+    public required Vector4 Surface2;
 }
 
 public static class Theme
@@ -49,6 +53,9 @@ public static class Theme
         Yellow  = Hex(0xEED49F),
         Red     = Hex(0xED8796),
         Shadow  = HexA(0x000000, 0.45f),
+        Surface0 = Hex(0x363A4F),
+        Surface1 = Hex(0x494D64),
+        Surface2 = Hex(0x5B6078),
     };
 
     public static readonly Palette Light = new()
@@ -69,6 +76,9 @@ public static class Theme
         Yellow  = Hex(0x9A6309),
         Red     = Hex(0xD20F39),
         Shadow  = HexA(0x1E233C, 0.25f),
+        Surface0 = Hex(0xDCE0EF),
+        Surface1 = Hex(0xC3CADF),
+        Surface2 = Hex(0xA6AFCB),
     };
 
     // Logo gradient stays the AGS signature red → mauve → blue in both themes.
@@ -94,6 +104,21 @@ public static class Theme
     public static Vector4 SelR => WithAlpha(P.Accent2, IsLight ? 0.13f : 0.20f);
 
     public static bool IsLight => ReferenceEquals(P, Light);
+
+    // v2 widget surfaces: quiet hairlines, raised fills a step above the glass, a one-pixel
+    // highlight on the top edge, focus as the accent at half alpha plus a soft outer glow.
+    public static Vector4 Hairline    => WithAlpha(P.Surface1, IsLight ? 0.95f : 0.55f);
+    public static Vector4 HairlineHot => WithAlpha(P.Surface2, IsLight ? 1f : 0.85f);
+    public static Vector4 RaisedFill  => WithAlpha(P.Surface0, 0.75f);
+    public static Vector4 RaisedHot   => WithAlpha(P.Surface1, 0.90f);
+    public static Vector4 Pressed     => WithAlpha(P.Surface0, 0.50f);
+    public static Vector4 Hilite      => IsLight ? WithAlpha(Hex(0xFFFFFF), 0.7f) : WithAlpha(Hex(0xB7BDF8), 0.09f);
+    /// <summary>The sliding thumb of a segmented switch: a step up in dark, white in light.</summary>
+    public static Vector4 Thumb       => IsLight ? P.Raised : RaisedHot;
+    public static Vector4 FocusRing   => WithAlpha(P.Accent, 0.55f);
+    public static Vector4 FocusGlow   => WithAlpha(P.Accent, 0.16f);
+    /// <summary>Text on an accent or gradient fill.</summary>
+    public static Vector4 Ink         => IsLight ? Hex(0xFFFFFF) : new Vector4(Dark.Glass, 1f);
 
     public static void Apply(bool light, float glassAlpha)
     {

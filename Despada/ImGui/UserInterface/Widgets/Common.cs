@@ -27,6 +27,8 @@ public static partial class Widgets
         if (frame % StateSweepEvery != 0) return;
 
         _anims.Sweep(frame, StateTtlFrames);
+        _springs.Sweep(frame, StateTtlFrames);
+        _numbers.Sweep(frame, StateTtlFrames);
         _comboPage.Sweep(frame, StateTtlFrames);
         _sliderKnobX.Sweep(frame, StateTtlFrames);
         _colorPickerState.Sweep(frame, StateTtlFrames);
@@ -91,6 +93,49 @@ public static partial class Widgets
         }
 
         return a.T;
+    }
+
+    private struct SpringState
+    {
+        public float X, V;
+        public int   SteppedFrame;
+    }
+
+    private static readonly StateStore<SpringState> _springs = new();
+
+    /// <summary>
+    /// A value that springs towards <paramref name="target"/> (thumbs, sliding segments): a little
+    /// overshoot, settles in ~200 ms. Stepped once per frame per id; the first call lands at once.
+    /// </summary>
+    private static float SpringTo(uint id, float target, float stiffness = 700f, float zeta = 0.75f)
+    {
+        ref var s = ref _springs.Get(id, new SpringState { X = target, SteppedFrame = -1 });
+        var frame = ImGuiNET.ImGui.GetFrameCount();
+        if (s.SteppedFrame != frame)
+        {
+            s.SteppedFrame = frame;
+            Anim.Spring(ref s.X, ref s.V, target, ImGuiNET.ImGui.GetIO().DeltaTime, stiffness, zeta);
+        }
+        return s.X;
+    }
+
+    /// <summary>0→1 hover ease for a control drawn by hand (keyed by its item id).</summary>
+    public static float Hover(uint id, bool hovered) => Animate(id ^ 0x33u, hovered, 24f);
+
+    private const float PressSpeed = 30f;   // ≈95 % in 100 ms
+    private const float PressScale = 0.96f;
+
+    /// <summary>
+    /// The rect of a control's fill while it is pressed: scaled about its centre to
+    /// <see cref="PressScale"/>, eased both ways. Only the fill moves, never the glyph.
+    /// </summary>
+    private static (Vector2 Min, Vector2 Max) Pressed(uint id, bool active, Vector2 min, Vector2 max)
+    {
+        var t = Animate(id ^ 0x5A5Au, active, PressSpeed);
+        if (t <= 0.001f) return (min, max);
+        var k = 1f - (1f - PressScale) * t;
+        var c = (min + max) * 0.5f;
+        return (UiScale.Snap(c + (min - c) * k), UiScale.Snap(c + (max - c) * k));
     }
 
     /// <summary>Invisible button at an absolute screen position. Cursor is left after the item.</summary>

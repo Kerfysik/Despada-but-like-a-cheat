@@ -10,53 +10,57 @@ namespace Despada.ImGui.UserInterface;
 
 public static partial class Widgets
 {
-    private const float CheckboxSize  = 28f;
+    private const float CheckboxSize  = 22f;
     private const float CheckboxRound = 6f;
 
-    public static bool Checkbox(string id, ref bool value)
+    /// <summary>
+    /// v2 flag: a Deep hairline box that fills with <paramref name="color"/> (the accent, or a rule
+    /// action's colour) when on; the check is drawn as a stroke that grows in.
+    /// </summary>
+    public static bool Checkbox(string id, ref bool value, Vector4? color = null)
     {
-        var pos = ImGuiNET.ImGui.GetCursorScreenPos();
+        // A frame-high item with the box centred, so it sits on the line like the toggle does.
+        var h    = MathF.Max(CheckboxSize, ImGuiNET.ImGui.GetFrameHeight());
+        var item = ImGuiNET.ImGui.GetCursorScreenPos();
+        var pos  = item + new Vector2(0f, (h - CheckboxSize) * 0.5f);
 
-        bool clicked = ImGuiNET.ImGui.InvisibleButton(id, new Vector2(CheckboxSize, CheckboxSize));
+        bool clicked = ImGuiNET.ImGui.InvisibleButton(id, new Vector2(CheckboxSize, h));
         bool hovered = ImGuiNET.ImGui.IsItemHovered();
         var  itemId  = ImGuiNET.ImGui.GetItemID();
 
-        if (clicked)
-        {
-            value = !value;
-            if (value)
-            {
-                var center = new Vector2(pos.X + CheckboxSize * 0.5f, pos.Y + CheckboxSize * 0.5f);
-                SpawnBurstSparks(center, 12);
-            }
-        }
+        if (clicked) value = !value;
 
-        var dl = ImGuiNET.ImGui.GetWindowDrawList();
-        var t  = Animate(itemId, value);
+        var dl  = ImGuiNET.ImGui.GetWindowDrawList();
+        var t   = Animate(itemId, value, 22f);
+        var hot = Animate(itemId ^ 0x33u, hovered, 24f);
+        var on  = color ?? Theme.P.Accent;
 
-        var min = pos;
-        var max = new Vector2(pos.X + CheckboxSize, pos.Y + CheckboxSize);
-
-        var bgOff = hovered ? Theme.Mix(Theme.P.Raised, Theme.P.Sep, 0.5f) : Theme.P.Raised;
-        dl.AddRectFilled(min, max, Theme.ToU32(Theme.Mix(bgOff, Theme.P.Accent, t)), CheckboxRound);
-
+        var (min, max) = Pressed(itemId, ImGuiNET.ImGui.IsItemActive(), pos, pos + new Vector2(CheckboxSize, CheckboxSize));
+        var off = Theme.Mix(Theme.IsLight ? Theme.RaisedFill : Theme.P.Deep, Theme.RaisedHot, hot * 0.6f);
+        dl.AddRectFilled(min, max, Theme.ToU32(Theme.Mix(off, on, t)), CheckboxRound);
         if (t < 0.99f)
-            dl.AddRect(min, max, Theme.ToU32(Theme.P.Sep), CheckboxRound, ImDrawFlags.None, 1f);
+        {
+            var line = Theme.Mix(Theme.Hairline, Theme.HairlineHot, hot);
+            dl.AddRect(min, max, Theme.ToU32(Theme.WithAlpha(line, line.W * (1f - t))), CheckboxRound, ImDrawFlags.None, 1f / UiScale.K);
+        }
 
         if (t > 0.01f)
         {
-            var cx = pos.X + CheckboxSize * 0.5f;
-            var cy = pos.Y + CheckboxSize * 0.5f;
-            var checkCol = Theme.ToU32(Theme.WithAlpha(Theme.IsLight ? Theme.Hex(0xFFFFFF) : Theme.Hex(0x161B2B), t));
-
-            Span<Vector2> checkPts =
-            [
-                new(cx - 5.5f, cy + 0.5f),
-                new(cx - 1f,   cy + 5f),
-                new(cx + 6.5f, cy - 4f)
-            ];
-
-            dl.AddPolyline(ref MemoryMarshal.GetReference(checkPts), checkPts.Length, checkCol, ImDrawFlags.None, 3f);
+            // The stroke grows along its path: first the short leg, then the long one.
+            var c  = (min + max) * 0.5f;
+            var u  = CheckboxSize / 22f;
+            Span<Vector2> pts = [c + new Vector2(-5.5f, 0.5f) * u, c + new Vector2(-1.5f, 4.5f) * u, c + new Vector2(6f, -4.5f) * u];
+            var ink = Theme.ToU32(Theme.WithAlpha(Theme.Ink, MathF.Min(1f, t * 1.5f)));
+            var l1 = Vector2.Distance(pts[0], pts[1]);
+            var l2 = Vector2.Distance(pts[1], pts[2]);
+            var len = t * (l1 + l2);
+            if (len <= l1)
+                dl.AddLine(pts[0], Vector2.Lerp(pts[0], pts[1], len / l1), ink, 2.5f);
+            else
+            {
+                Span<Vector2> path = [pts[0], pts[1], Vector2.Lerp(pts[1], pts[2], MathF.Min(1f, (len - l1) / l2))];
+                dl.AddPolyline(ref MemoryMarshal.GetReference(path), path.Length, ink, ImDrawFlags.None, 2.5f);
+            }
         }
 
         return clicked;

@@ -12,6 +12,7 @@ namespace Despada.ImGui.UserInterface;
 
 internal static class SettingsPanel
 {
+
     private const float D       = UiScale.DesignHeight / 1080f;
     private const float MaxWidth = 640f * D;
 
@@ -54,6 +55,19 @@ internal static class SettingsPanel
             var blur = cfg.GlassBlur;
             if (Widgets.SliderFloat("Glass blur", ref blur, 0f, 1f, decimals: 2, step: 0.05f))
                 DespadaConfig.Update(c => c.GlassBlur = blur);
+        }
+        Widgets.EndSection();
+
+        Widgets.BeginSection("Network");
+        {
+            // The safety for the active side: not saved, off again after a restart.
+            var armed = Despada.Modules.Net.NetActive.Armed;
+            if (Widgets.ToggleRow("Active network (arm)", ref armed)) Despada.Modules.Net.NetActive.Armed = armed;
+            ImGuiNET.ImGui.AlignTextToFramePadding();
+            ImGuiNET.ImGui.TextUnformatted("Rate cap");
+            ImGuiNET.ImGui.SameLine(ImGuiNET.ImGui.GetCursorPosX() + ImGuiNET.ImGui.GetContentRegionAvail().X - 150f);
+            var cap = Despada.Modules.Net.NetActive.RateLimit;
+            if (Widgets.NumberField("##cap", ref cap, 1, 1000, 1, null, "/s", 150f)) Despada.Modules.Net.NetActive.RateLimit = cap;
         }
         Widgets.EndSection();
 
