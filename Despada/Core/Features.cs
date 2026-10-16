@@ -76,6 +76,13 @@ internal static partial class Features
             return;
         }
 
+        var without = f.Optional.Where(b => { b.Resolve(); return !b.Ok; }).Select(b => b.Name).ToList();
+        if (without.Count > 0)
+        {
+            f.Warning = $"without {string.Join(", ", without)}";
+            Log.Warn(f.Id, $"{f.Title} runs {f.Warning}");
+        }
+
         if (IsEnabled(f))
             Enable(f);
     }

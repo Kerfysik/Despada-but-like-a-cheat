@@ -35,12 +35,18 @@ internal abstract class Feature
     /// <summary>Bindings that must resolve for the feature to be usable.</summary>
     public virtual IReadOnlyList<Binding> Requires => [];
 
+    /// <summary>Bindings the feature can do without (a detail missing on an older engine): a warning, not a stop.</summary>
+    public virtual IReadOnlyList<Binding> Optional => [];
+
     public virtual bool EnabledByDefault => false;
 
     public FeatureState State  { get; internal set; }
 
     /// <summary>Why it is <see cref="FeatureState.Unavailable"/> or <see cref="FeatureState.Crashed"/>.</summary>
     public string? Reason { get; internal set; }
+
+    /// <summary>Optional bindings that weren't found: the feature runs without them.</summary>
+    public string? Warning { get; internal set; }
 
     /// <summary>Install hooks/ticks. Throwing (or a hook that fails to apply) marks it crashed.</summary>
     protected internal abstract void OnEnable();

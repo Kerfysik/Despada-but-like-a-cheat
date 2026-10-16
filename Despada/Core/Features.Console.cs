@@ -37,8 +37,8 @@ internal static partial class Features
 
     public static string Describe(Feature f) => f.State switch
     {
-        FeatureState.On          => "on",
-        FeatureState.Off         => "off",
+        FeatureState.On          => f.Warning is { } w ? $"on ({w})" : "on",
+        FeatureState.Off         => f.Warning is { } w ? $"off ({w})" : "off",
         FeatureState.Unavailable => $"unavailable ({f.Reason})",
         _                        => $"crashed ({f.Reason})",
     };

@@ -35,7 +35,27 @@ internal static partial class Features
             ImGuiNET.ImGui.PopStyleColor();
         }
         else if (f.State == FeatureState.On)
+        {
+            // Running without an optional binding: a ⚠ at the row's right end, the names on hover.
+            var rowY  = ImGuiNET.ImGui.GetCursorScreenPos().Y;
+            var right = ImGuiNET.ImGui.GetCursorScreenPos().X + ImGuiNET.ImGui.GetContentRegionAvail().X;
             Guarded(f, "tab row", f.DrawTabRow);
+            if (f.Warning is { } warning)
+            {
+                var at = new Vector2(right - 10f * (UiScale.DesignHeight / 1080f) - ImGuiNET.ImGui.CalcTextSize("⚠").X, rowY + ImGuiNET.ImGui.GetStyle().FramePadding.Y);
+                ImGuiNET.ImGui.GetWindowDrawList().AddText(at, Theme.ToU32(Theme.WithAlpha(Theme.P.Yellow, 0.85f)), "⚠");
+                var m = ImGuiNET.ImGui.GetIO().MousePos;
+                if (m.X >= at.X - 6f && m.X <= right + 6f && m.Y >= rowY && m.Y <= rowY + ImGuiNET.ImGui.GetFrameHeight())
+                    ImGuiNET.ImGui.SetTooltip(warning);
+            }
+        }
+        else if (f.Warning is { } warning)
+        {
+            ImGuiNET.ImGui.AlignTextToFramePadding();
+            ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Theme.WithAlpha(Theme.P.Yellow, 0.8f));
+            ImGuiNET.ImGui.TextUnformatted($"⚠ {warning}");
+            ImGuiNET.ImGui.PopStyleColor();
+        }
 
         ImGuiNET.ImGui.PopID();
     }
