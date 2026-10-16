@@ -26,6 +26,25 @@ public sealed class FakeInteractDraftEvent
     public int[] Tags = [1, 2];
     public NetEntity? Maybe;
 }
+public sealed class SnapInner { public string Name = "a"; public List<int> Ids = [1, 2]; }
+public sealed class SnapProbe
+{
+    public NetEntity Target = new(1873);
+    public FakeHand Hand = FakeHand.Right;
+    public object Key = FakeHand.Left;                       // an enum behind object: the type travels with it
+    public FakeCoordinates Where = new() { NetEntity = new NetEntity(2), Position = new FakeVector2 { X = 1.5f, Y = -2f } };
+    public int[] Tags = [3, 4];
+    public Dictionary<string, int> Counts = new() { ["a"] = 1, ["b"] = 2 };
+    public SnapInner? Inner = new();
+    public SnapInner? Missing;
+    public float? Alpha = 0.25f;
+    public TimeSpan Delay = TimeSpan.FromMilliseconds(1500);
+    public string? Note;
+    public byte[] Blob = [1, 2, 250];
+    public Stack<int> Order = new([1, 2, 3]);
+}
+public sealed class SnapHolder { public Dictionary<string, int[]> Map = new(); public SnapInner? Inner; }
+public sealed class SnapHuge { public byte[] Big = new byte[10]; public int[] Many = new int[60_000]; public int After = 42; }
 public sealed class MsgState { }
 public sealed class MsgStateAck { }
 public sealed class MsgStateLeavePvs { }
@@ -37,6 +56,15 @@ public class NetQueryTests
         => new() { Type = Type.GetType("Despada.Tests." + type) ?? typeof(object), Dir = dir, Size = size, Tick = tick, Summary = summary };
 
     private static bool M(string q, Packet p) => NetQuery.Parse(q).Matches(p, x => x.Summary ?? "");
+
+    [Fact]
+    public void ExactTypeTokenDoesNotMatchLongerNames()
+    {
+        Assert.True(M("type:MsgState", P("MsgStateAck", NetDir.Out)));    // contains
+        Assert.False(M("type:=MsgState", P("MsgStateAck", NetDir.Out)));  // exact
+        Assert.True(M("type:=MsgState", P("MsgState", NetDir.In)));
+        Assert.True(M("type:=msgstate", P("MsgState", NetDir.In)));
+    }
 
     [Fact]
     public void Type_Dir_Size_Tick()
@@ -202,15 +230,21 @@ public class NetCaptureTests
     {
         NetCapture.Clear();
         NetCapture.Capacity = 5000;
-        NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Message = new MsgChatMessage() });
-        var first = NetCapture.LastSeq;
-        // Small packets all keep their object; going over the byte budget drops the oldest.
-        for (var i = 0; i < 2100; i++) NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Size = 40, Message = new object() });
-        Assert.NotNull(NetCapture.Get(first)!.Message);
-        NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Size = (int)NetCapture.KeepBytes, Message = new object() });
-        var p = NetCapture.Get(first)!;
-        Assert.Null(p.Message);
-        Assert.Equal("who took the jaws?", p.Summary);
+        var keep = NetCapture.KeepPerType;
+        NetCapture.KeepPerType = 10_000;   // one type here: the byte budget is what's under test
+        try
+        {
+            NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Message = new MsgChatMessage() });
+            var first = NetCapture.LastSeq;
+            // Small packets all keep their object; going over the byte budget drops the oldest.
+            for (var i = 0; i < 2100; i++) NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Size = 40, Message = new object() });
+            Assert.NotNull(NetCapture.Get(first)!.Message);
+            NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Size = (int)NetCapture.KeepBytes, Message = new object() });
+            var p = NetCapture.Get(first)!;
+            Assert.Null(p.Message);
+            Assert.Equal("who took the jaws?", p.Summary);
+        }
+        finally { NetCapture.KeepPerType = keep; }
     }
 
     [Fact]
@@ -366,7 +400,8 @@ public class NetDecodeTests
         Assert.Equal("Right", byPath["Hand"].Value);
         Assert.Equal(DraftKind.Number, byPath["Coordinates.Position.X"].Kind);   // nested structs unfold
         Assert.Equal("12.5", byPath["Coordinates.Position.X"].Value);
-        Assert.Equal(DraftKind.Readonly, byPath["Tags"].Kind);                   // collections aren't edited
+        Assert.Equal(DraftKind.Number, byPath["Tags[0]"].Kind);                   // list items are edited one by one
+        Assert.Equal("2", byPath["Tags[1]"].Value);
         Assert.Equal(DraftKind.Entity, byPath["Maybe"].Kind);
         Assert.Equal("", byPath["Maybe"].Value);                                  // a nullable: empty = null
         Assert.Equal(0, d.ChangedCount);
@@ -391,6 +426,228 @@ public class NetDecodeTests
         Assert.Equal("test", back.Name);
         Assert.Equal(NetDir.Out, back.Dir);
         Assert.Equal("Left", back.Values["Hand"]);
+    }
+
+    [Fact]
+    public void SnapshotRoundTripsThroughJson()
+    {
+        var src = new SnapProbe();
+        var json = ObjectSnapshot.ToJson(ObjectSnapshot.Take(src));
+        var back = (SnapProbe)ObjectSnapshot.Materialize(ObjectSnapshot.FromJson(json)!)!;
+
+        Assert.Equal(1873, back.Target.Id);
+        Assert.Equal(FakeHand.Right, back.Hand);
+        Assert.Equal(FakeHand.Left, back.Key);
+        Assert.Equal(2, back.Where.NetEntity.Id);
+        Assert.Equal(-2f, back.Where.Position.Y);
+        Assert.Equal([3, 4], back.Tags);
+        Assert.Equal(2, back.Counts["b"]);
+        Assert.Equal("a", back.Inner!.Name);
+        Assert.Equal([1, 2], back.Inner.Ids);
+        Assert.Null(back.Missing);
+        Assert.Equal(0.25f, back.Alpha);
+        Assert.Equal(TimeSpan.FromMilliseconds(1500), back.Delay);
+        Assert.Null(back.Note);
+        Assert.Equal([1, 2, 250], back.Blob);                 // bytes travel as one base64 leaf
+        Assert.Equal([1, 2, 3], back.Order.ToArray());        // a stack keeps its order
+        Assert.DoesNotContain("\"n\":false", json);            // defaults aren't written
+    }
+
+    [Fact]
+    public void ACutSnapshotRefusesToRebuild()
+    {
+        var node = ObjectSnapshot.Take(new SnapHuge());       // 60k items: over the node budget
+        Assert.False(node.Complete);
+        var ex = Assert.Throws<InvalidOperationException>(() => ObjectSnapshot.Materialize(node));
+        Assert.Contains("cut", ex.Message);
+        // A draft of it can't be sent from the snapshot: Build throws instead of sending zeros.
+        var d = PacketDraft.From(new Packet { Type = typeof(SnapHuge), Dir = NetDir.Out, Message = new SnapHuge(), Seq = 999_997 })!;
+        Assert.Throws<InvalidOperationException>(() => DraftBuilder.Build(d, out _));
+        // And a saved copy keeps no snapshot rather than a broken one.
+        Assert.True(SavedPacket.FromDraft(d, "huge").NoSnapshot);
+    }
+
+    [Fact]
+    public void DraftBuildsFromItsSnapshotWhenThePacketIsGone()
+    {
+        // Seq 999_999 is not in the log: the live object can't be used, the snapshot is.
+        var p = new Packet { Type = typeof(SnapProbe), Dir = NetDir.Out, Message = new SnapProbe(), Seq = 999_999 };
+        var d = PacketDraft.From(p)!;
+        Assert.NotNull(d.Source);
+        d.Walk().First(x => x.Path == "Hand").Field.Value = "Left";
+        var built = (SnapProbe)DraftBuilder.Build(d, out _);
+        Assert.Equal(FakeHand.Left, built.Hand);         // the edit
+        Assert.Equal([3, 4], built.Tags);                // a read-only field, back from the snapshot
+        Assert.Equal(FakeHand.Left, built.Key);
+        Assert.Equal("a", built.Inner!.Name);
+    }
+
+    [Fact]
+    public void SavedPacketKeepsTheSnapshotAndItsEditsApply()
+    {
+        var p = new Packet { Type = typeof(SnapProbe), Dir = NetDir.Out, Message = new SnapProbe(), Seq = 999_998 };
+        var d = PacketDraft.From(p)!;
+        d.Walk().First(x => x.Path == "Where.Position.X").Field.Value = "7";
+        var back = SavedPacket.FromDto(SavedPacket.FromDraft(d, "probe").ToDto());
+        Assert.NotNull(back.Source);
+        var again = back.Draft()!;
+        Assert.Equal(0, again.ChangedCount);             // what was saved is the edited packet itself
+        var built = (SnapProbe)DraftBuilder.Build(again, out _);
+        Assert.Equal(7f, built.Where.Position.X);
+        Assert.Equal([3, 4], built.Tags);
+    }
+
+    [Fact]
+    public void MuteKeepsMatchingPacketsOutOfTheLog_Unarmed()
+    {
+        NetActive.Reset();
+        NetActive.Rules.Clear();
+        NetCapture.Clear();
+        NetActive.MutedCount = 0;
+        var mute = new NetRule { Action = RuleAction.Mute }; mute.SetFilter("type:MsgState");
+        NetActive.Rules.Add(mute);
+        try
+        {
+            Assert.True(NetCapture.Add(new Packet { Type = typeof(MsgState), Dir = NetDir.In, Size = 1 }));      // delivered
+            Assert.True(NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Size = 1 }));
+            Assert.Equal(1, NetCapture.Count);                    // only the chat message was logged
+            Assert.Equal(typeof(MsgChatMessage), NetCapture.Snapshot()[0].Type);
+            Assert.Equal(1, mute.Hits);
+            Assert.Equal(1, NetActive.MutedCount);
+            Assert.Equal(1, NetCapture.TotalIn);                  // the muted one isn't counted as logged traffic
+        }
+        finally { NetActive.Rules.Clear(); NetCapture.Clear(); }
+    }
+
+    [Fact]
+    public void PinnedRulesRoundTripThroughTheirDto()
+    {
+        var r = new NetRule { Action = RuleAction.Duplicate, Count = 4, EveryMs = 20, Enabled = false };
+        r.SetFilter("dir:out type:=MsgStateAck !unsafe");
+        var back = NetRule.FromDto(r.ToDto());
+        Assert.Equal(RuleAction.Duplicate, back.Action);
+        Assert.Equal((4, 20, false, true), (back.Count, back.EveryMs, back.Enabled, back.Pinned));
+        Assert.Equal(r.Filter, back.Filter);
+        Assert.True(back.Unsafe);
+        Assert.Equal(2, back.Query.Tokens.Count);
+    }
+
+    [Fact]
+    public void LongStringsWrapByWords()
+    {
+        const string text = "\"Removes 30,0 кДж of heat from the body it's in when у него есть по крайней мере 12ед. this reagent.\"";
+        var lines = new List<string>();
+        for (var at = 0; at < text.Length;)
+        {
+            var (start, end) = NetView.NextLine(text, at, 46);
+            lines.Add(text[start..end]);
+            at = end;
+        }
+        Assert.Equal(3, lines.Count);
+        Assert.All(lines, l => { Assert.True(l.Length <= 46); Assert.False(l.StartsWith(' ')); Assert.False(l.EndsWith(' ')); });
+        Assert.Equal(text, string.Join(' ', lines));                       // whole words, nothing lost
+        Assert.EndsWith("reagent.\"", lines[^1]);                           // the closing quote stays with its word
+        var word = new string('x', 100);
+        Assert.Equal((0, 40), NetView.NextLine(word, 0, 40));              // a word longer than a line is cut
+    }
+
+    [Fact]
+    public void TypeLabelsFoldFromTheInsideToFit()
+    {
+        const string t = "KeyValuePair<string, FrozenDictionary<string, FrozenDictionary<string, object>>>";
+        Assert.Equal(t, NetView.ElideType(t, 100));
+        Assert.Equal("KeyValuePair<string, FrozenDictionary<string, …>>", NetView.ElideType(t, 50));
+        Assert.Equal("KeyValuePair<string, FrozenDictionary<…>>", NetView.ElideType(t, 41));
+        Assert.Equal("KeyValuePair<…>", NetView.ElideType(t, 20));
+        Assert.Equal("KeyValuePair<…>", NetView.ElideType(t, 10));   // the floor: never folded further
+        Assert.Equal("List<int>", NetView.ElideType("List<int>", 9));
+    }
+
+    [Fact]
+    public void TableValuesShowContentAndPagesOpenOnDemand()
+    {
+        var big = new Dictionary<string, int[]>();
+        for (var i = 0; i < 250; i++) big[$"k{i}"] = [i];
+        var root = NetDecode.Root(new Packet { Type = typeof(object), Message = new SnapHolder { Map = big, Inner = new SnapInner() } });
+        var kids = NetDecode.Children(root).ToDictionary(c => c.Name);
+        Assert.Equal("250 entries", kids["Map"].ValueText[0].Text);                       // a dictionary: its count
+        Assert.StartsWith("{Name = \"a\"", kids["Inner"].ValueText[0].Text);              // an object: its first fields
+        var items = NetDecode.Children(kids["Map"]);
+        Assert.Equal(101, items.Count);                                                   // 100 + the "… more" row
+        Assert.Equal("\"k0\"", items[0].ValueText[0].Text);                               // a pair: its key
+        Assert.Same(kids["Map"], items[^1].PageOf);
+        Assert.Equal("… 150 more", items[^1].ValueText[0].Text);
+        kids["Map"].ShowMore(all: false);
+        Assert.Equal(201, NetDecode.Children(kids["Map"]).Count);
+        kids["Map"].ShowMore(all: true);
+        Assert.Equal(250, NetDecode.Children(kids["Map"]).Count);
+    }
+
+    [Fact]
+    public void ACapPerTypeEvictsTheOldestOfThatTypeOnly()
+    {
+        NetActive.Reset();
+        NetActive.Rules.Clear();
+        NetCapture.Clear();
+        var keep = NetCapture.KeepPerType;
+        NetCapture.KeepPerType = 50;
+        var before = NetCapture.EvictionCount;
+        try
+        {
+            NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Size = 1 });   // the one that must survive
+            for (var i = 0; i < 120; i++) NetCapture.Add(new Packet { Type = typeof(MsgState), Dir = NetDir.In, Size = 1 });
+            var all = NetCapture.Snapshot();
+            Assert.Equal(51, all.Count);
+            Assert.Equal(51, NetCapture.Count);
+            Assert.Equal(typeof(MsgChatMessage), all[0].Type);                       // still there, before the states
+            Assert.Equal(50, all.Count(p => p.Type == typeof(MsgState)));
+            Assert.Equal((50, 120, 120L), (NetCapture.TypeStats("MsgState").Kept, (int)NetCapture.TypeStats("MsgState").Total, NetCapture.TypeStats("MsgState").Total));
+            Assert.Equal(1, NetCapture.TypeStats("MsgChatMessage").Kept);
+            Assert.Equal("", NetCapture.TypeHint("Nope"));
+            var (gone, complete) = NetCapture.EvictedSince(before);
+            Assert.True(complete);
+            Assert.Equal(70, gone.Count);                                             // the list gets every evicted seq
+            Assert.All(gone, seq => Assert.Null(NetCapture.Get(seq)));
+        }
+        finally { NetCapture.KeepPerType = keep; NetCapture.Clear(); }
+    }
+
+    [Fact]
+    public void ListItemsAreEditedAddedAndRemoved()
+    {
+        var p = new Packet { Type = typeof(SnapProbe), Dir = NetDir.Out, Message = new SnapProbe(), Seq = 999_996 };
+        var d = PacketDraft.From(p)!;
+        var tags  = d.Root.Children.Single(f => f.Name == "Tags");
+        var inner = d.Root.Children.Single(f => f.Name == "Inner");
+        var ids   = inner.Children.Single(f => f.Name == "Ids");
+        Assert.Equal(DraftKind.List, tags.Kind);
+        Assert.Equal(["[0]", "[1]"], tags.Children.Select(c => c.Name));
+        Assert.Equal(0, d.ChangedCount);
+
+        tags.Children[0].Value = "9";                         // edit
+        PacketDraft.AddItem(tags).Value = "5";                 // add
+        PacketDraft.RemoveItem(ids, ids.Children[0]);          // remove from a nested list
+        Assert.Equal("[0]", ids.Children[0].Name);             // renumbered
+        Assert.True(tags.Touched);
+        Assert.Equal(4, d.ChangedCount);                       // the edit, the new item's value, the two touched lists
+
+        var built = (SnapProbe)DraftBuilder.Build(d, out _);
+        Assert.Equal([9, 4, 5], built.Tags);
+        Assert.Equal([2], built.Inner!.Ids);
+        Assert.Equal(FakeHand.Left, built.Key);                // untouched fields stay (the live object is used)
+
+        var saved = SavedPacket.FromDraft(d, "lists").Draft()!;   // saved as the edited packet
+        Assert.Equal([9, 4, 5], ((SnapProbe)DraftBuilder.Build(saved, out _)).Tags);
+    }
+
+    [Fact]
+    public void FinderHighlightsEveryOccurrence()
+    {
+        var spans = Despada.ImGui.UserInterface.Finder.Highlight("ss14s://corvaxforge.ru/corvax", "corvax", Tone.Green);
+        Assert.Equal(["ss14s://", "corvax", "forge.ru/", "corvax"], spans.Select(s => s.Text));
+        Assert.Equal([Tone.Green, Tone.Accent2, Tone.Green, Tone.Accent2], spans.Select(s => s.Tone));
+        Assert.Equal("Corvax", Despada.ImGui.UserInterface.Finder.Highlight("Corvax", "CORVAX").Single().Text);   // case-insensitive, one span
+        Assert.Single(Despada.ImGui.UserInterface.Finder.Highlight("nothing", "x"));
     }
 
     [Fact]
@@ -669,6 +926,10 @@ public class NetDecodeTests
         Assert.True(DraftBuilder.TrySet(o, "Hand", "Left", out _));
         Assert.Equal(FakeHand.Left, o.Hand);
         Assert.True(DraftBuilder.TrySet(o, "Target", "5", out _));
+        Assert.True(DraftBuilder.TrySet(o, "Tags[1]", "9", out _));            // an array element
+        Assert.Equal(9, o.Tags[1]);
+        Assert.False(DraftBuilder.TrySet(o, "Tags[5]", "9", out var range));  // out of range: a reason, not a throw
+        Assert.Contains("2 items", range);
         Assert.Equal(5, o.Target.Id);
         Assert.False(DraftBuilder.TrySet(o, "Target", "abc", out var err));
         Assert.Contains("Target", err);
@@ -721,5 +982,122 @@ public class NetDecodeTests
         NetCapture.MarkNext(PacketMark.Copy);
         NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Size = 1, Message = new MsgChatMessage() });
         Assert.Equal(NetDir.Out, NetActive.DirectionOf("MsgChatMessage"));   // a delivery to ourselves doesn't count
+    }
+}
+
+public class FinderWalkTests
+{
+    public sealed class WalkComp { public string Name = "comp"; public int A = 1; public int[] Ids = [1, 2, 3]; }
+    public sealed class WalkEnt  { public int Uid; public List<WalkComp> Comps = [new(), new(), new(), new(), new()]; }
+    public sealed class WalkState { public int Tick = 1; public List<WalkEnt> Ents = []; public string Server = "ss14.example.net:1212"; public string Note = ""; }
+
+    private static IFinderSource Fields => Finder.Sources.Single(s => s.Tab == "Fields");
+    private static FinderQuery Q(string text, bool brief = false, long after = 0, long until = long.MaxValue) => new(text, 100, after, until, brief);
+
+    private static void Fresh()
+    {
+        NetActive.Reset(); NetActive.Rules.Clear(); NetCapture.Clear();
+        NetView.UnregisterFinder();
+        NetView.RegisterFinder();
+    }
+
+    [Fact]
+    public void AFieldAfterABigListIsStillFound()
+    {
+        Fresh();
+        var st = new WalkState();
+        for (var i = 0; i < 400; i++) st.Ents.Add(new WalkEnt { Uid = i });
+        NetCapture.Add(new Packet { Type = typeof(WalkState), Dir = NetDir.In, Size = 1, Message = st });
+        try
+        {
+            var hits = Fields.Search(Q("example")).OfType<FinderItem>().ToList();
+            Assert.Single(hits);
+            Assert.Equal("Server", hits[0].Left[0].Text);
+        }
+        finally { NetView.UnregisterFinder(); NetCapture.Clear(); }
+    }
+
+    [Fact]
+    public void AnOldPacketIsFoundBehindAThousandNewerOnes()
+    {
+        Fresh();
+        NetCapture.Add(new Packet { Type = typeof(WalkState), Dir = NetDir.In, Size = 1, Message = new WalkState { Server = "hub.corvax.example" } });
+        for (var i = 0; i < 1000; i++) NetCapture.Add(new Packet { Type = typeof(WalkComp), Dir = NetDir.In, Size = 1, Message = new WalkComp() });
+        try
+        {
+            // Cold: a pause before each packet's index is made, so the finder's slice can stop the search.
+            var steps = Fields.Search(Q("corvax")).ToList();
+            Assert.True(steps.Count(s => s is null) >= 30, $"{steps.Count} steps");
+            var hit = Assert.Single(steps.OfType<FinderItem>());
+            Assert.Equal("Server", hit.Left[0].Text);
+            // The index: one line per field (name, path, type, kind, tone, value), gone with the message.
+            var p = NetCapture.Snapshot()[0];
+            Assert.Contains("Server\u0001Server\u0001string\u0001s\u0001", p.Index);
+            Assert.Contains("hub.corvax.example", p.Index);
+            // Warm: only a scan of the indexes.
+            Assert.True(Fields.Search(Q("corvax")).Count() < 100);
+            // A live update: only what came after the version searched, up to the version now.
+            var version = Fields.Version;
+            NetCapture.Add(new Packet { Type = typeof(WalkState), Dir = NetDir.In, Size = 1, Message = new WalkState { Server = "corvax-two" } });
+            Assert.NotEqual(version, Fields.Version);
+            var fresh = Fields.Search(Q("corvax", after: version, until: Fields.Version)).OfType<FinderItem>().ToList();
+            Assert.Single(fresh);
+            Assert.Contains("corvax-two", string.Concat(fresh[0].Value.Select(v => v.Text)));
+        }
+        finally { NetView.UnregisterFinder(); NetCapture.Clear(); }
+    }
+
+    [Fact]
+    public void ListsAreSearchedWholeAndStringsWhole()
+    {
+        Fresh();
+        var st = new WalkState { Note = new string('x', 500) + " needle-in-note " + new string('y', 500) };
+        for (var i = 0; i < 350; i++) st.Ents.Add(new WalkEnt { Uid = 7000 + i });
+        NetCapture.Add(new Packet { Type = typeof(WalkState), Dir = NetDir.In, Size = 1, Message = st });
+        try
+        {
+            // Item 340 lies past the first three pages of 100: the item (its summary) and its field.
+            var deep = Fields.Search(Q("7340")).OfType<FinderItem>().Select(h => h.Link[h.Link.IndexOf(' ')..].Trim()).ToList();
+            Assert.Equal(["Ents[340]", "Ents[340].Uid"], deep);
+            // The whole string is matched; the row shows a window around the match.
+            var note = Assert.Single(Fields.Search(Q("needle-in-note")).OfType<FinderItem>());
+            var shown = string.Concat(note.Value.Select(v => v.Text));
+            Assert.Contains("needle-in-note", shown);
+            Assert.True(shown.Length < 200, shown);
+            Assert.StartsWith("\"…", shown);
+        }
+        finally { NetView.UnregisterFinder(); NetCapture.Clear(); }
+    }
+
+    [Fact]
+    public void BriefGivesOneRowPerPacketWithACount()
+    {
+        Fresh();
+        var st = new WalkState();
+        for (var i = 0; i < 3; i++) st.Ents.Add(new WalkEnt { Uid = i });   // "Comps" in 3 list names, "comp" in 15 item summaries and 15 Name values
+        NetCapture.Add(new Packet { Type = typeof(WalkState), Dir = NetDir.In, Size = 1, Message = st });
+        try
+        {
+            Assert.Equal(33, Fields.Search(Q("comp")).OfType<FinderItem>().Count());
+            var brief = Assert.Single(Fields.Search(Q("comp", brief: true)).OfType<FinderItem>());
+            Assert.Equal("Comps", string.Concat(brief.Left.Select(l => l.Text)));   // a name match, the shallowest
+            Assert.StartsWith("+32 · ", brief.Right);
+        }
+        finally { NetView.UnregisterFinder(); NetCapture.Clear(); }
+    }
+
+    [Fact]
+    public void APathResolvesThroughPagedLists()
+    {
+        var st = new WalkState();
+        for (var i = 0; i < 350; i++) st.Ents.Add(new WalkEnt { Uid = i });
+        var root = NetDecode.Root(new Packet { Type = typeof(WalkState), Message = st });
+        var node = NetView.Resolve(root, "Ents[340].Comps[2].Ids");
+        Assert.NotNull(node);
+        Assert.Equal("Ids", node!.Name);
+        var ents = NetDecode.Children(root).Single(c => c.Name == "Ents");
+        Assert.True(ents.Expanded);
+        Assert.Equal(4, ents.Page);                                   // paged out to the item
+        Assert.Equal(350, NetDecode.Children(ents).Count);            // the fourth page shows the rest
     }
 }

@@ -40,6 +40,27 @@ public class ByteStreamTests
     private static IEnumerable<ByteToken> Of(ByteStream s, ByteKind k) => s.Tokens.Where(t => t.Kind == k);
 
     [Fact]
+    public void Utf8_text_is_a_string_with_its_chars_mapped_to_bytes()
+    {
+        const string text = "Утоляет жажду";                                   // 13 chars, 25 bytes
+        var utf8  = Encoding.UTF8.GetBytes(text);
+        var bytes = Cat(new byte[] { 0x01, (byte)(utf8.Length + 1), (byte)text.Length }, utf8, new byte[] { 7, 1, 2, 3 });
+        var s = ByteStream.Build(bytes, null);
+
+        var str = Assert.Single(Of(s, ByteKind.Str));
+        Assert.Equal(text, str.PlainText);
+        Assert.Equal((3, utf8.Length, text.Length), (str.Offset, str.Length, str.Chars));
+        var len = Assert.Single(Of(s, ByteKind.Len));
+        Assert.Equal((0, 3, "25"), (len.Offset, len.Length, len.PlainText));   // the prefix: 01, bytes + 1, chars
+        Assert.Equal(3 + 2, str.ByteAt(1));                                      // "У" is two bytes
+        Assert.Equal(1, str.CharAt(3 + 3));                                      // the second byte of "т" is still char 1
+        Assert.Equal((7, 9), str.CharRange(str.ByteAt(7), str.ByteAt(9)));       // "жа"
+        Assert.Equal((0, 13), str.CharRange(0, 100));
+        var lines = s.Wrap(8);                                                   // "25" + 6 chars, then the rest
+        Assert.Equal(3 + 2 * 6, lines[1].Offset);                                // the second line starts at the 7th char's byte
+    }
+
+    [Fact]
     public void Type_name_with_its_prefix_inside_the_printable_run()
     {
         const string name = "Content.Shared.Foo.BarEvent, Content.Shared";   // 43 chars: prefix 0x2c 0x2b, both printable
