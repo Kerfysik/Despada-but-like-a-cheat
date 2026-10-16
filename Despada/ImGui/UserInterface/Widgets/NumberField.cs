@@ -187,7 +187,7 @@ public static partial class Widgets
     }
 
     /// <summary>
-    /// The repeat control (form C): one hairline box with two halves, "× N" and "every ms", the
+    /// The repeat control: one hairline box with two halves, "× N" and "every ms", the
     /// second half sliding open only once N is 2 or more. Each half scrubs, wheels and types.
     /// </summary>
     public static bool Repeat(string id, ref int times, ref int everyMs)

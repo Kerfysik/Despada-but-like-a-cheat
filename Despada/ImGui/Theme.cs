@@ -214,7 +214,9 @@ public static class Theme
         colors[(int)ImGuiCol.TableRowBgAlt]     = P.Deep;
 
         colors[(int)ImGuiCol.NavCursor]             = P.Accent;
-        colors[(int)ImGuiCol.ModalWindowDimBg]      = HexA(0x000000, 0.35f);
+        // ImGui's veil behind a modal covers the whole screen, the game included, and is read at
+        // EndFrame (a push around the popup can't change it): off, the finder dims the window itself.
+        colors[(int)ImGuiCol.ModalWindowDimBg]      = Vector4.Zero;
         colors[(int)ImGuiCol.NavWindowingHighlight] = P.Accent;
         colors[(int)ImGuiCol.DragDropTarget]        = P.Accent2;
     }

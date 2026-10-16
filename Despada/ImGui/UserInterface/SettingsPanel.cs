@@ -68,6 +68,11 @@ internal static class SettingsPanel
             ImGuiNET.ImGui.SameLine(ImGuiNET.ImGui.GetCursorPosX() + ImGuiNET.ImGui.GetContentRegionAvail().X - 150f);
             var cap = Despada.Modules.Net.NetActive.RateLimit;
             if (Widgets.NumberField("##cap", ref cap, 1, 1000, 1, null, "/s", 150f)) Despada.Modules.Net.NetActive.RateLimit = cap;
+            ImGuiNET.ImGui.AlignTextToFramePadding();
+            ImGuiNET.ImGui.TextUnformatted("Keep per type");
+            ImGuiNET.ImGui.SameLine(ImGuiNET.ImGui.GetCursorPosX() + ImGuiNET.ImGui.GetContentRegionAvail().X - 150f);
+            var keep = Despada.Modules.Net.NetCapture.KeepPerType;
+            if (Widgets.NumberField("##keep", ref keep, 50, 100_000, 50, null, null, 150f)) Despada.Modules.Net.NetFeature.SetKeepPerType(keep);
         }
         Widgets.EndSection();
 

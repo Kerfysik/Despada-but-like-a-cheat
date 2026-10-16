@@ -78,7 +78,65 @@ internal static unsafe class ConsolePanel
         }
     }
 
+    static ConsolePanel() => Finder.Sources.Add(new CommandSource());
+
     public static void RequestFocus() => _focusInput = true;
+
+    /// <summary>Puts text at the end of the input (a link from the finder) and shows the console.</summary>
+    public static void InsertLink(string text)
+    {
+        var s = Active;
+        s.Input = s.Input.Length == 0 || s.Input.EndsWith(' ') ? s.Input + text : s.Input + " " + text;
+        _caretToEnd = true;
+        Shell.ShowConsole();
+    }
+
+    // Text put into the input from outside: the caret goes after it (a refocus would select it all).
+    private static bool _caretToEnd;
+
+    /// <summary>The finder's Commands tab.</summary>
+    internal sealed class CommandSource : IFinderSource
+    {
+        public string Tab => "Commands";
+        public int Rank => 90;
+
+        public IEnumerable<FinderItem?> Search(FinderQuery fq)
+        {
+            var (query, limit, _, _, _) = fq;
+            foreach (var c in ConsoleCommands.All)
+            {
+                if (!c.Name.Contains(query, StringComparison.OrdinalIgnoreCase) && !c.Description.Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
+                var name = c.Name;
+                yield return new FinderItem
+                {
+                    Icon   = Icon.Chevron,
+                    Left   = Finder.Highlight(name, query),
+                    Value  = Finder.Highlight(c.Description, query, Tone.Muted),
+                    Right  = c.Usage,
+                    Open   = () => { Active.Input = name + " "; _caretToEnd = true; Shell.ShowConsole(); },
+                    Preview = () => CommandPreview(c, query),
+                    Link   = name,
+                    Action = "put in console",
+                };
+                if (--limit <= 0) yield break;
+            }
+        }
+    }
+
+    // The usage line, then the description in lines of words.
+    private static List<(Span[], bool)> CommandPreview(ConsoleCommand c, string query)
+    {
+        var lines = new List<(Span[], bool)> { ([new Span(c.Usage, Tone.Muted)], false) };
+        var line  = new System.Text.StringBuilder();
+        foreach (var word in c.Description.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (line.Length > 0 && line.Length + 1 + word.Length > 100) { lines.Add((Finder.Highlight(line.ToString(), query), false)); line.Clear(); }
+            if (line.Length > 0) line.Append(' ');
+            line.Append(word);
+        }
+        if (line.Length > 0) lines.Add((Finder.Highlight(line.ToString(), query), false));
+        return lines;
+    }
 
     /// <summary>Runs a command in the active session as if typed (it goes into the history too).</summary>
     public static void Run(string line) => Active.Submit(line);
@@ -247,15 +305,17 @@ internal static unsafe class ConsolePanel
         // Input line.
         ImGuiNET.ImGui.Dummy(new Vector2(0f, gap - ImGuiNET.ImGui.GetStyle().ItemSpacing.Y));
         ImGuiNET.ImGui.SetCursorPosX(ImGuiNET.ImGui.GetCursorPosX() + 10f * D);
-        // The outline is ImGui's own child border, drawn under the parent's clip (a rect drawn inside
-        // the child got half clipped). 1/K logical units = exactly one physical pixel.
+        // The outline is drawn on the parent after the child (inside it, a rect gets half clipped).
+        var inMin = UiScale.Snap(ImGuiNET.ImGui.GetCursorScreenPos());
+        var inMax = UiScale.Snap(inMin + new Vector2(avail.X - 20f * D, inputH));
+        var inDl  = ImGuiNET.ImGui.GetWindowDrawList();
         ImGuiNET.ImGui.PushStyleColor(ImGuiCol.ChildBg, Theme.P.Deep);
         ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Border, Theme.P.Sep);
-        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, Theme.SmallRounding);
-        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.ChildBorderSize, 1f / UiScale.K);
+        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 10f * D);
+        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.ChildBorderSize, 0f);
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(12f * D, 0f));
         ImGuiNET.ImGui.BeginChild("##in", new Vector2(avail.X - 20f * D, inputH),
-            ImGuiChildFlags.Borders | ImGuiChildFlags.AlwaysUseWindowPadding, ImGuiWindowFlags.NoScrollbar);
+            ImGuiChildFlags.AlwaysUseWindowPadding, ImGuiWindowFlags.NoScrollbar);
 
         var lineH = ImGuiNET.ImGui.GetFrameHeight();
         ImGuiNET.ImGui.SetCursorPosY((inputH - lineH) * 0.5f);
@@ -312,6 +372,8 @@ internal static unsafe class ConsolePanel
         ImGuiNET.ImGui.EndChild();
         ImGuiNET.ImGui.PopStyleVar(3);
         ImGuiNET.ImGui.PopStyleColor(2);
+        inDl.AddRect(inMin, inMax, Theme.ToU32(Theme.Hairline), 10f * D, ImDrawFlags.None, 1f / UiScale.K);
+        Gfx.FocusRing(inDl, inMin, inMax, 10f * D, Widgets.Hover(ImGuiNET.ImGui.GetID("##in"), InputActive));
     }
 
     // Session keys follow yazi's tab keys behind Alt (the input always has focus, so bare keys would
@@ -321,6 +383,7 @@ internal static unsafe class ConsolePanel
     // so the game never sees these keys at the same time.
     private static void HandleHotkeys()
     {
+        if (Finder.IsOpen) return;   // its field owns the keyboard
         if (_escape)
         {
             _escape = false;
@@ -585,6 +648,11 @@ internal static unsafe class ConsolePanel
             _clearPending = false;
             data.DeleteChars(0, data.BufTextLen);
             _lastCursor = _lastLen = 0;
+        }
+        if (_caretToEnd)
+        {
+            _caretToEnd = false;
+            data.CursorPos = data.SelectionStart = data.SelectionEnd = data.BufTextLen;
         }
 
         // The field stays active across a session switch (hotkeys, commands), and an active

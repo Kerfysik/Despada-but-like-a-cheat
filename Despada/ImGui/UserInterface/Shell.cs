@@ -4,6 +4,7 @@
 
 using System.Numerics;
 using Despada.Core;
+using Despada.ImGui.Hook;
 using ImGuiNET;
 
 namespace Despada.ImGui.UserInterface;
@@ -40,13 +41,30 @@ public static class Shell
         ConsolePanel.RequestFocus();
     }
 
+    /// <summary>Switches to a feature's section by its id (a finder hit opening there).</summary>
+    public static void Show(string sectionId)
+    {
+        if (sectionId == ConsoleId) { ShowConsole(); return; }
+        if (Features.Find(sectionId) is { Tab: not null }) _section = sectionId;
+    }
+
+    static Shell() => Finder.Closed += () => { if (_section == ConsoleId) ConsolePanel.RequestFocus(); };
+
     /// <summary>Called when the overlay is hidden.</summary>
-    public static void OnClosed() => SettingsPanel.CancelCapture();
+    public static void OnClosed()
+    {
+        SettingsPanel.CancelCapture();
+        Finder.Close();
+    }
 
     public static void Draw()
     {
         Widgets.ResetFrame();
         ConsolePanel.InputActive = false;
+        Finder.Scope = null;
+        ImGuiInputHook.Want(ImGuiKey.D, Mod.Ctrl);
+        var kio = ImGuiNET.ImGui.GetIO();
+        if (kio.KeyCtrl && !kio.KeyShift && !kio.KeyAlt && ImGuiNET.ImGui.IsKeyPressed(ImGuiKey.D, false)) Finder.Toggle();
 
         // Keyboard policy: the shown section declares the keys it listens for every frame
         // (ImGuiInputHook.Want) and gets them wherever the mouse is, no click needed; every other
@@ -77,7 +95,7 @@ public static class Shell
         var open = ImGuiNET.ImGui.Begin("despada##main",
             ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoScrollbar |
             ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoMove |
-            ImGuiWindowFlags.NoResize);
+            ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoBringToFrontOnFocus);
         ImGuiNET.ImGui.PopStyleVar();
         if (blur) ImGuiNET.ImGui.PopStyleColor();
 
@@ -113,6 +131,7 @@ public static class Shell
         }
 
         ImGuiNET.ImGui.End();
+        if (_winPos is { } at) Finder.Draw(at, size);
         Widgets.EndFrame();
     }
 

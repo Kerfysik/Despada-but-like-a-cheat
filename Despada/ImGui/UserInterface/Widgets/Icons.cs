@@ -26,6 +26,12 @@ public enum Icon
     Dots,     // more (⋯)
     Play,
     Pause,
+    Pin,      // kept across restarts
+    Field,    // a grid: a field of a packet
+    Bytes,    // a box with ticks: raw bytes
+    Diamond,  // a type
+    Chevron,  // a console command
+    Search,   // a magnifier
 }
 
 public static partial class Widgets
@@ -125,6 +131,33 @@ public static partial class Widgets
             case Icon.Pause:
                 dl.AddRectFilled(P(-6f, -7f), P(-2f, 7f), col, 1f * u);
                 dl.AddRectFilled(P(2f, -7f), P(6f, 7f), col, 1f * u);
+                break;
+            case Icon.Pin:
+                PolyAt(dl, c, u, col, thickness, [new(-4f, -8f), new(4f, -8f), new(3f, -2f), new(7f, 2f), new(-7f, 2f), new(-3f, -2f)], true);
+                LineAt(dl, c, u, col, thickness, 0f, 2f, 0f, 8f);
+                break;
+            case Icon.Field:
+                LineAt(dl, c, u, col, thickness, -3f, -7f, -3f, 7f);
+                LineAt(dl, c, u, col, thickness, 3f, -7f, 3f, 7f);
+                LineAt(dl, c, u, col, thickness, -7f, -3f, 7f, -3f);
+                LineAt(dl, c, u, col, thickness, -7f, 3f, 7f, 3f);
+                break;
+            case Icon.Bytes:
+                dl.AddRect(P(-7f, -5f), P(7f, 5f), col, 2f * u, ImDrawFlags.None, thickness);
+                LineAt(dl, c, u, col, thickness, -3f, -1f, -3f, 1f);
+                LineAt(dl, c, u, col, thickness, 0f, -2f, 0f, 2f);
+                LineAt(dl, c, u, col, thickness, 3f, -1f, 3f, 1f);
+                break;
+            case Icon.Diamond:
+                PolyAt(dl, c, u, col, thickness, [new(0f, -7f), new(7f, 0f), new(0f, 7f), new(-7f, 0f)], true);
+                break;
+            case Icon.Chevron:
+                PolyAt(dl, c, u, col, thickness, [new(-5f, -6f), new(1f, 0f), new(-5f, 6f)], false);
+                LineAt(dl, c, u, col, thickness, 2f, 6f, 7f, 6f);
+                break;
+            case Icon.Search:
+                dl.AddCircle(P(-1.5f, -1.5f), 5f * u, col, 0, thickness);
+                LineAt(dl, c, u, col, thickness, 2.2f, 2.2f, 7f, 7f);
                 break;
         }
     }

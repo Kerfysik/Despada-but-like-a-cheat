@@ -7,7 +7,7 @@ using ImGuiNET;
 
 namespace Despada.ImGui.UserInterface;
 
-// The menu (form V3): a Pop surface with a surface1 outline, radius 12, 6 px padding; rows of 34
+// The menu: a Pop surface with a surface1 outline, radius 12, 6 px padding; rows of 34
 // with a 22 px icon slot at the left (an icon, or a coloured dot for a rule action), hairlines
 // between groups, a muted caption for a group. One widget for the packet / field / selection
 // context menus, tab overflow, combo lists and the "/" commands.

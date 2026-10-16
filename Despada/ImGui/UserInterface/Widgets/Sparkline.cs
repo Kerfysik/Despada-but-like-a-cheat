@@ -88,7 +88,7 @@ public static partial class Widgets
     }
 
     /// <summary>
-    /// The traffic widget (form T3): a hairline box with ↓ growing up from the middle and ↑ growing
+    /// The traffic widget: a hairline box with ↓ growing up from the middle and ↑ growing
     /// down from it, then the two rates in fixed six-character slots. Fixed 152 px wide: the window
     /// never jumps.
     /// </summary>

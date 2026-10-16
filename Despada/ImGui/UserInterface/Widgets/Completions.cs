@@ -14,7 +14,7 @@ public static partial class Widgets
     private const float CompletionPadX = 12f;
 
     /// <summary>
-    /// The completion list (form A2): a small Pop box under the caret with the names only, the
+    /// The completion list: a small Pop box under the caret with the names only, the
     /// picked row on the gradient bar, and that row's description floating beside the box (to the
     /// right, or to the left when the screen ends). Drawn on the given list (usually the
     /// foreground, over the field). The typed text is tinted where it occurs in each name.
@@ -23,14 +23,18 @@ public static partial class Widgets
     /// <c>min.Y + CompletionPad</c>); the row under the mouse is <paramref name="hover"/>.
     /// </summary>
     public static void Completions(ImDrawListPtr dl, Vector2 at, ReadOnlySpan<(string Name, string Desc)> items, int selected,
-        ReadOnlySpan<char> typed, out Vector2 min, out Vector2 max, out int hover, bool shadow = true)
+        ReadOnlySpan<char> typed, out Vector2 min, out Vector2 max, out int hover, bool shadow = true, float limitX = float.NaN, float limitMinX = 0f)
     {
         var n = items.Length;
         var nameW = 0f;
         for (var i = 0; i < n; i++) nameW = MathF.Max(nameW, ImGuiNET.ImGui.CalcTextSize(items[i].Name).X);
         var w = MathF.Max(200f, nameW + CompletionPadX * 2f + CompletionPad * 2f);
         var display = ImGuiNET.ImGui.GetIO().DisplaySize;
-        at.X = MathF.Max(0f, MathF.Min(at.X, display.X - w - 8f));   // the box stays on screen
+        // Inside a popup the list and its description must stay within it: the caller's limits.
+        // Narrower than the room between them, the box shrinks and the names are clipped.
+        var edge = float.IsNaN(limitX) ? display.X : limitX;
+        w = MathF.Min(w, edge - limitMinX);
+        at.X = MathF.Max(limitMinX, MathF.Min(at.X, edge - w));
         min = UiScale.Snap(at);
         max = UiScale.Snap(min + new Vector2(w, CompletionRowH * n + CompletionPad * 2f));
         var r = 10f;
@@ -61,6 +65,7 @@ public static partial class Widgets
                 dl.AddRectFilled(rowMin, rowMax, Theme.ToU32(Theme.WithAlpha(Theme.RaisedHot, 0.4f)), 7f);
 
             var (name, desc) = items[i];
+            dl.PushClipRect(rowMin, rowMax, true);
             var tx = rowMin.X + CompletionPadX;
             var ty = y + (CompletionRowH - lineH) * 0.5f;
             var fg = Theme.ToU32(i == selected ? Theme.P.Fg : Theme.P.Sub);
@@ -76,13 +81,14 @@ public static partial class Widgets
                 tx += ImGuiNET.ImGui.CalcTextSize(span.Slice(hit, typed.Length)).X;
                 dl.AddText(new Vector2(tx, ty), fg, span[(hit + typed.Length)..]);
             }
+            dl.PopClipRect();
 
             // The picked row's description beside the box, on whichever side has room.
             if (i == selected && desc.Length > 0)
             {
                 var dw = ImGuiNET.ImGui.CalcTextSize(desc).X;
-                var dx = max.X + 14f + dw <= display.X ? max.X + 14f : min.X - 14f - dw;
-                dl.AddText(new Vector2(dx, ty), Theme.ToU32(Theme.P.Muted), desc);
+                var dx = max.X + 14f + dw <= edge ? max.X + 14f : min.X - 14f - dw;
+                if (dx >= limitMinX) dl.AddText(new Vector2(dx, ty), Theme.ToU32(Theme.P.Muted), desc);
             }
         }
     }
