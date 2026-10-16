@@ -58,6 +58,9 @@ internal sealed class Packet
     /// <summary>The message object; dropped for older packets to keep memory bounded.</summary>
     public object? Message;
 
+    /// <summary>The finder's text of the fields (name, value per line), built once on the first search; goes with <see cref="Message"/>.</summary>
+    public string? Index;
+
     /// <summary>
     /// Holders that need the message and bytes kept (an inspector tab, the frozen queue), counted:
     /// NetCapture.Pin / Unpin. One holder letting go must not drop what another still shows.

@@ -14,6 +14,8 @@ internal enum RuleAction
     Duplicate,
     /// <summary>Fields are changed before the packet goes on (<see cref="NetRule.Modify"/>).</summary>
     Modify,
+    /// <summary>The packet goes through but is kept out of the log (noise that would push the rest out). Needs no arm.</summary>
+    Mute,
 }
 
 /// <summary>"filter → action": what to do with every packet the filter matches. Data only.</summary>
@@ -39,6 +41,9 @@ internal sealed class NetRule
         && Query.Tokens.Any(t => t.Key == "type" && !t.Negated && "MsgStateAck".Contains(t.Value, StringComparison.OrdinalIgnoreCase));
     public bool Enabled = true;
 
+    /// <summary>Written to the config and back on the next start (the pin in the rules panel).</summary>
+    public bool Pinned;
+
     /// <summary>Duplicate: how many copies, how far apart.</summary>
     public int Count = 1, EveryMs = 50;
 
@@ -50,6 +55,32 @@ internal sealed class NetRule
 
     /// <summary>A token the filter can't use: the rule is off rather than matching everything.</summary>
     public bool Invalid => Query.Tokens.Any(t => !NetQuery.IsValid(t));
+
+    public sealed class Dto
+    {
+        public string Filter { get; set; } = "";
+        public string Action { get; set; } = "block";
+        public bool Enabled { get; set; } = true;
+        public int Count { get; set; } = 1;
+        public int EveryMs { get; set; } = 50;
+        public string Modify { get; set; } = "";
+    }
+
+    public Dto ToDto() => new()
+    {
+        Filter = Filter, Action = Action.ToString().ToLowerInvariant(), Enabled = Enabled, Count = Count, EveryMs = EveryMs, Modify = Modify,
+    };
+
+    public static NetRule FromDto(Dto d)
+    {
+        var r = new NetRule
+        {
+            Action = Enum.TryParse<RuleAction>(d.Action, ignoreCase: true, out var a) ? a : RuleAction.Block,
+            Enabled = d.Enabled, Count = d.Count, EveryMs = d.EveryMs, Modify = d.Modify, Pinned = true,
+        };
+        r.SetFilter(d.Filter);
+        return r;
+    }
 
     public IEnumerable<(string Path, string Value)> ModifyPairs()
     {

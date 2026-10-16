@@ -40,6 +40,8 @@ internal static unsafe partial class NetView
     private static bool   _rowsDirty = true;
     private static bool   _stickToBottom = true;
     private static int    _rowsRemovedAbove;  // rows dropped from the top this frame (keeps the view still)
+    private static int    _topRow;            // the first row on screen last frame
+    private static long   _evictionsSeen;
     private static int    _ghostRows;         // of those, the ones last frame still laid out as blank rows
     private static bool   _menuHeld;          // the list held still for an open menu last frame
     private static int    _typeChars = 14;    // width of the type column, in characters
@@ -77,6 +79,7 @@ internal static unsafe partial class NetView
 
         BeginKeys();
         ImGuiNET.ImGui.Dummy(new Vector2(0f, 6f * D));
+        Finder.Scope = _tabKind == TabKind.Packet && ActiveDoc() is { } doc ? $"#{doc.Seq} {doc.Inner ?? doc.Type.Name}" : null;
 
         // Any other tab takes the whole body; "packets" goes back to the list.
         if (_tabKind == TabKind.Packet && ActiveDoc() is null) ShowList();
@@ -94,6 +97,7 @@ internal static unsafe partial class NetView
                 case TabKind.Frozen: DrawFrozenTab(width, bodyH); break;
                 case TabKind.Saved:  DrawSavedTab(width, bodyH); break;
                 case TabKind.Draft:  DrawDraftTab(_activeDraft!, width, bodyH); break;
+                case TabKind.Pick:   DrawPickTab(width, bodyH); break;
             }
             ImGuiNET.ImGui.Unindent(left);
             return;
@@ -133,6 +137,7 @@ internal static unsafe partial class NetView
     private static void Update()
     {
         var query = CurrentQuery(out var key);
+        key += "\n" + NetActive.MuteKey();   // muted types leave the list too
         var changed = key != _appliedQuery;
         if (changed)
         {
@@ -144,6 +149,21 @@ internal static unsafe partial class NetView
             _rowsRemovedAbove = 0;   // counted against the old rows (e.g. while the inspector was open)
             ClearMulti();            // a selection is of what was listed
             _anchor = -1;
+        }
+
+        // Packets evicted by the per-type cap leave the list where they were.
+        var pruned = false;
+        if (NetCapture.EvictionCount != _evictionsSeen)
+        {
+            var (gone, complete) = NetCapture.EvictedSince(_evictionsSeen);
+            _evictionsSeen = NetCapture.EvictionCount;
+            if (complete) foreach (var seq in gone) RemoveMatch(seq);
+            else
+            {
+                _matches.RemoveAll(seq => NetCapture.Get(seq) is null);
+                _rowsDirty = true;
+            }
+            pruned = true;
         }
 
         // Packets that fell out of the ring (or were cleared), and with since: those now too old.
@@ -171,13 +191,13 @@ internal static unsafe partial class NetView
         {
             _scanned = p.Seq;
             Learn(p);
-            if (!_query.Matches(p, NetDecode.Summary)) continue;
+            if (!_query.Matches(p, NetDecode.Summary) || NetActive.IsMutedForView(p)) continue;
             _matches.Add(p.Seq);
             if (!_rowsDirty) _rows.Add(new Row { Seq = p.Seq });
         }
 
         // Unfolded packets that left the list would otherwise keep their message objects alive.
-        if (changed || drop > 0)
+        if (changed || drop > 0 || pruned)
         {
             var visible = new HashSet<long>(_matches);
             foreach (var k in _open.Keys.Where(k => k < first || !visible.Contains(k)).ToList())
@@ -216,6 +236,28 @@ internal static unsafe partial class NetView
             if (id.ToString(System.Globalization.CultureInfo.InvariantCulture).StartsWith(w, StringComparison.Ordinal))
                 found.Add((id, type, count, seq));
         return found.OrderByDescending(e => e.Seq).Take(8).Select(e => (e.Id, $"{e.Type} · {e.Count}")).ToList();
+    }
+
+    // One packet out of the list and its rows; rows above the screen count as removed from the top.
+    private static void RemoveMatch(long seq)
+    {
+        var i = _matches.BinarySearch(seq);
+        if (i < 0) return;
+        _matches.RemoveAt(i);
+        _multi.Remove(seq);
+        _open.Remove(seq);
+        if (_rowsDirty) return;
+        int lo = 0, hi = _rows.Count;
+        while (lo < hi)
+        {
+            var mid = (lo + hi) / 2;
+            if (_rows[mid].Seq < seq) lo = mid + 1; else hi = mid;
+        }
+        var n = 0;
+        while (lo + n < _rows.Count && _rows[lo + n].Seq == seq) n++;
+        if (n == 0) return;
+        _rows.RemoveRange(lo, n);
+        if (lo < _topRow) _rowsRemovedAbove += Math.Min(n, _topRow - lo);
     }
 
     private static void Rebuild()
@@ -277,6 +319,7 @@ internal static unsafe partial class NetView
         // (otherwise a band of blank rows would stay above the first one).
         var removed = _rowsRemovedAbove;
         _rowsRemovedAbove = 0;
+        _topRow = (int)(ImGuiNET.ImGui.GetScrollY() / step);
         var ghost = Math.Min(removed, (int)(ImGuiNET.ImGui.GetScrollY() / step));
         var heading = SmoothScroll.Update(-ghost * step);
         // GetScrollMaxY() still counts last frame's blank rows; compare with where the bottom will be.
@@ -414,7 +457,7 @@ internal static unsafe partial class NetView
         dl.AddText(pos + new Vector2(cols.Time, 0f), Theme.ToU32(Theme.P.Muted), p.TimeText ??= NetFeature.Time(p));
         dl.AddText(pos + new Vector2(cols.Dir, 0f), Theme.ToU32(p.Dir == NetDir.In ? Theme.P.Accent : Theme.P.Accent2),
             p.Dir == NetDir.In ? "↓" : "↑");
-        dl.AddText(pos + new Vector2(cols.Type, 0f), Theme.ToU32(p.Type.Name == "MsgState" ? Theme.P.Sub : Theme.P.Fg), p.Type.Name);
+        dl.AddText(pos + new Vector2(cols.Type, 0f), Theme.ToU32(Theme.P.Fg), p.Type.Name);
         var size = p.SizeText ??= NetFeature.Bytes(p.Size);
         dl.AddText(pos + new Vector2(cols.SizeRight - ImGuiNET.ImGui.CalcTextSize(size).X, 0f), Theme.ToU32(Theme.P.Sub), size);
         if (badgeW > 0f && mark != PacketMark.Copy) dl.PushClipRect(pos, pos + new Vector2(width - badgeW, lineH), true);

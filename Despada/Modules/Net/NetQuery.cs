@@ -118,7 +118,13 @@ internal sealed class NetQuery
         switch (t.Key)
         {
             case "type":
-                // The message type, or the event inside a MsgEntity.
+                // The message type, or the event inside a MsgEntity; "type:=X" is the exact name.
+                if (t.Value.StartsWith('='))
+                {
+                    var exact = t.Value.AsSpan(1);
+                    return exact.Equals(p.Type.Name, StringComparison.OrdinalIgnoreCase)
+                        || (p.Inner is { } inner && exact.Equals(inner, StringComparison.OrdinalIgnoreCase));
+                }
                 return p.Type.Name.Contains(t.Value, StringComparison.OrdinalIgnoreCase)
                     || p.Inner?.Contains(t.Value, StringComparison.OrdinalIgnoreCase) == true;
             case "entity":
@@ -193,9 +199,10 @@ internal sealed class NetQuery
     /// </summary>
     /// <param name="entities">Entity ids seen in the capture, newest first, with a hint each.</param>
     public static List<(string Insert, string Hint)> Suggest(string word, IEnumerable<string> types,
-        IEnumerable<(int Id, string Hint)>? entities = null)
+        IEnumerable<(int Id, string Hint)>? entities = null, Func<string, string>? typeHint = null)
     {
         entities ??= [];
+        typeHint ??= _ => "";
         var neg  = word.StartsWith('-') ? "-" : "";
         var body = neg.Length > 0 ? word[1..] : word;
         var list = new List<(string, string)>();
@@ -218,7 +225,7 @@ internal sealed class NetQuery
             {
                 // A bare word: the types and entities it could mean ("MsgStateAc" → type:MsgStateAck).
                 foreach (var t in MatchTypes(types, body).Take(6))
-                    list.Add(($"{neg}type:{t}", "type"));
+                    list.Add(($"{neg}type:{t}", typeHint(t) is { Length: > 0 } h ? h : "type"));
                 if (body.All(char.IsAsciiDigit))
                     foreach (var (id, hint) in entities.Where(e => e.Id.ToString(CultureInfo.InvariantCulture).StartsWith(body, StringComparison.Ordinal)).Take(6))
                         list.Add(($"{neg}entity:{id}", hint));
@@ -230,7 +237,7 @@ internal sealed class NetQuery
         var val = body[(colon + 1)..];
         IEnumerable<(string, string)> values = key switch
         {
-            "type"   => MatchTypes(types, val).Take(8).Select(t => (t, "")),
+            "type"   => MatchTypes(types, val).Take(8).Select(t => (t, typeHint(t))),
             "entity" => entities.Where(e => e.Id.ToString(CultureInfo.InvariantCulture).StartsWith(val, StringComparison.Ordinal)).Take(8).Select(e => (e.Id.ToString(), e.Hint)),
             "dir"   => new[] { ("in", "↓ received"), ("out", "↑ sent") }.Where(v => v.Item1.StartsWith(val)),
             "size"  => new[] { (">1KB", "bigger than 1 KB"), ("<100", "smaller than 100 B") }.Where(v => v.Item1.StartsWith(val)),

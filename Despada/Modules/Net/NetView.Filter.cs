@@ -13,7 +13,7 @@ namespace Despada.Modules.Net;
 
 internal static unsafe partial class NetView
 {
-    private static readonly List<NetQuery.Token> _chips = new();
+    private static readonly List<NetQuery.Token> _chips = [new NetQuery.Token("@", "quiet", false)];
 
     private sealed class TokenBox
     {
@@ -134,7 +134,7 @@ internal static unsafe partial class NetView
             _bar.Sug = !_filterActive ? []
                      : word.StartsWith('/') ? SlashSuggest(word)
                      : HasSlash(_bar.Text) ? []   // a command's arguments: no filter completions
-                     : word.Length > 0 || _chips.Count == 0 ? NetQuery.Suggest(word, TypeSource(), KnownEntities(word)).Take(10).ToList()
+                     : word.Length > 0 || _chips.Count == 0 ? NetQuery.Suggest(word, TypeSource(), KnownEntities(word), NetCapture.TypeHint).Take(10).ToList()
                      : [];
         if (_bar.Sug.Count == 1 && _bar.Sug[0].Insert == word) _bar.Sug.Clear();
         _bar.SugIndex = Math.Clamp(_bar.SugIndex, 0, Math.Max(0, _bar.Sug.Count - 1));
@@ -196,8 +196,25 @@ internal static unsafe partial class NetView
         // Search: narrows the filters and presets shown, with the bar's completions (Tab or a click
         // takes one, ↑/↓ pick); Enter adds what was typed as filters, or toggles the one preset it names.
         if (ImGuiNET.ImGui.IsWindowAppearing()) _focusPanel = true;
-        ImGuiNET.ImGui.SetNextItemWidth(-1f);
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBg, Theme.P.Deep);
+
+        // The field looks like the bar: a Deep box with the › prompt, a hairline, the focus ring.
+        var dl    = ImGuiNET.ImGui.GetWindowDrawList();
+        var pos   = ImGuiNET.ImGui.GetCursorScreenPos();
+        var w     = ImGuiNET.ImGui.GetContentRegionAvail().X;
+        var h     = ImGuiNET.ImGui.GetFrameHeight();
+        var pad   = ImGuiNET.ImGui.GetStyle().FramePadding;
+        var bMin  = UiScale.Snap(pos);
+        var bMax  = UiScale.Snap(pos + new Vector2(w, h));
+        dl.AddRectFilled(bMin, bMax, Theme.ToU32(Theme.P.Deep), 10f * D);
+        var x = pos.X + 12f * D;
+        dl.AddText(new Vector2(x, pos.Y + pad.Y), Theme.ToU32(Theme.P.Accent), "›");
+        x += ImGuiNET.ImGui.CalcTextSize("›").X + 10f * D;
+
+        ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x, pos.Y));
+        ImGuiNET.ImGui.SetNextItemWidth(MathF.Max(bMax.X - x - 8f * D, 40f));
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBg, Vector4.Zero);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, Vector4.Zero);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBgActive, Vector4.Zero);
         if (_focusPanel)
         {
             ImGuiNET.ImGui.SetKeyboardFocusHere();
@@ -210,30 +227,37 @@ internal static unsafe partial class NetView
         ImGuiNET.ImGui.InputText("##panel-search", ref _panel.Text, 128,
             ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackCompletion, _filterCallback);
         io.ConfigInputTextEnterKeepActive = keep;
+        var active = ImGuiNET.ImGui.IsItemActive();
         _cb = _bar;
-        ImGuiNET.ImGui.PopStyleColor();
+        ImGuiNET.ImGui.PopStyleColor(3);
+        dl.AddRect(bMin, bMax, Theme.ToU32(Theme.Hairline), 10f * D, ImDrawFlags.None, 1f / UiScale.K);
+        Gfx.FocusRing(dl, bMin, bMax, 10f * D, Widgets.Hover(ImGuiNET.ImGui.GetID("##panel-search"), active));
+        ImGuiNET.ImGui.SetCursorScreenPos(pos);
+        ImGuiNET.ImGui.Dummy(new Vector2(w, h));
 
         var pword = CurrentWord(_panel.Text);
         // From the text alone (not "while active"): a click on a suggestion deactivates the field first.
         if (_panel.ReplaceWith is null)
             _panel.Sug = pword.Length > 0
-                ? NetQuery.Suggest(pword, TypeSource(), KnownEntities(pword)).Take(8).ToList()
+                ? NetQuery.Suggest(pword, TypeSource(), KnownEntities(pword), NetCapture.TypeHint).Take(8).ToList()
                 : [];
         if (_panel.Sug.Count == 1 && _panel.Sug[0].Insert == pword) _panel.Sug.Clear();
         _panel.SugIndex = Math.Clamp(_panel.SugIndex, 0, Math.Max(0, _panel.Sug.Count - 1));
-        for (var i = 0; i < _panel.Sug.Count; i++)
+        if (_panel.Sug.Count > 0)
         {
-            var (insert, hint) = _panel.Sug[i];
-            ImGuiNET.ImGui.PushID(i);
-            if (ImGuiNET.ImGui.Selectable($"{insert}   {hint}##sug", i == _panel.SugIndex, ImGuiSelectableFlags.NoAutoClosePopups))
+            // The same completion list as under the bar, inline under the field; the
+            // description stays inside the popup, so it goes to the right only when it fits.
+            var at = new Vector2(x + ImGuiNET.ImGui.CalcTextSize(_panel.Text[..^pword.Length]).X + pad.X, pos.Y + h + 4f * D);
+            Widgets.Completions(dl, at, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_panel.Sug), _panel.SugIndex, pword,
+                out var sMin, out var sMax, out var sHover, shadow: false, limitX: bMax.X, limitMinX: bMin.X);
+            if (sHover >= 0 && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Left))
             {
-                _panel.ReplaceWith = insert;
+                _panel.ReplaceWith = _panel.Sug[sHover].Insert;
                 _focusPanel = true;
                 ImGuiInputHook.ClaimKeyboard();   // the field is inactive until refocused
             }
-            ImGuiNET.ImGui.PopID();
+            ImGuiNET.ImGui.Dummy(new Vector2(1f, sMax.Y - pos.Y - h + 6f * D));
         }
-        if (_panel.Sug.Count > 0) ImGuiNET.ImGui.Separator();
 
         var q = _panel.Text.Trim();
         bool Shown(string s) => q.Length == 0 || s.Contains(q, StringComparison.OrdinalIgnoreCase);
@@ -245,14 +269,12 @@ internal static unsafe partial class NetView
 
         var remove = -1;
         var negate = -1;
-        var anyShown = false;
         foreach (var (key, caption) in Groups)
         {
             var any = false;
             for (var i = 0; i < _chips.Count; i++)
             {
                 if (_chips[i].Key != key || !Shown(_chips[i].ToString())) continue;
-                anyShown = true;
                 if (!any)
                 {
                     PanelCaption(caption);
@@ -267,10 +289,8 @@ internal static unsafe partial class NetView
                 ImGuiNET.ImGui.PopID();
             }
         }
-        if (_chips.Count == 0)
+        if (_chips.Count == 0 && _panel.Sug.Count == 0)
             PanelCaption("none");
-        else if (!anyShown)
-            PanelCaption("no match");
 
         // Presets: on/off with a click.
         ImGuiNET.ImGui.Separator();
@@ -392,7 +412,7 @@ internal static unsafe partial class NetView
         _sugShown = _bar.Sug.Count > 0;
         if (!_sugShown) return;
 
-        // The list under the caret: names only, the picked one's hint beside (form A2).
+        // The list under the caret: names only, the picked one's hint beside.
         Widgets.Completions(ImGuiNET.ImGui.GetForegroundDrawList(), _sugAt, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_bar.Sug),
             _bar.SugIndex, CurrentWord(_bar.Text), out _sugMin, out _sugMax, out _);
         _sugRowH  = Widgets.CompletionRowH;
@@ -490,6 +510,7 @@ internal static unsafe partial class NetView
         ("/freeze",  RuleAction.Freeze,    "hold them in the frozen tab"),
         ("/dup",     RuleAction.Duplicate, "send copies: /dup 3 50"),
         ("/modify",  RuleAction.Modify,    "change fields: /modify Field=value"),
+        ("/mute",    RuleAction.Mute,      "keep them out of the log (still delivered)"),
         ("/release", null,                 "let every frozen packet go"),
         ("/drop",    null,                 "throw every frozen packet away"),
         ("/clear",   null,                 "drop every filter"),

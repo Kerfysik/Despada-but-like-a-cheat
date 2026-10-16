@@ -32,6 +32,30 @@ internal sealed class ByteToken(ByteKind kind, int offset, int length)
     public string? FieldValue { get; set; }
 
     public string PlainText => string.Concat(Text.Select(s => s.Text));
+
+    /// <summary>For a string: the byte offset (from the token's start) where each character starts, plus the end; null when one char is one byte.</summary>
+    public int[]? CharStarts { get; set; }
+
+    public int Chars => CharStarts is { } c ? c.Length - 1 : Length;
+
+    /// <summary>The absolute byte offset where character <paramref name="index"/> starts (the end for the count).</summary>
+    public int ByteAt(int index) => Offset + (CharStarts is { } c ? c[Math.Clamp(index, 0, c.Length - 1)] : Math.Clamp(index, 0, Length));
+
+    /// <summary>The character holding absolute byte <paramref name="offset"/>.</summary>
+    public int CharAt(int offset)
+    {
+        var rel = Math.Clamp(offset - Offset, 0, Length);
+        if (CharStarts is not { } c) return rel;
+        var i = Array.BinarySearch(c, rel);
+        return i >= 0 ? Math.Min(i, c.Length - 2) : ~i - 1;
+    }
+
+    /// <summary>The characters [From, To) that the bytes [<paramref name="a"/>, <paramref name="b"/>) touch.</summary>
+    public (int From, int To) CharRange(int a, int b)
+    {
+        if (b <= Offset || a >= End) return (0, 0);
+        return (a <= Offset ? 0 : CharAt(a), b >= End ? Chars : CharAt(b - 1) + 1);
+    }
 }
 
 /// <summary>One visual line of the wrapped stream: the offset of its first byte and its pieces.</summary>
@@ -86,21 +110,67 @@ internal sealed class ByteStream
 
     public static bool Printable(byte b) => b is >= 32 and < 127;
 
+    /// <summary>The byte length of the text character at <paramref name="at"/> (printable ASCII or well-formed UTF-8, no controls), 0 when none.</summary>
+    public static int CharLength(ReadOnlySpan<byte> bytes, int at)
+    {
+        var b = bytes[at];
+        if (Printable(b)) return 1;
+        static bool Cont(ReadOnlySpan<byte> s, int i) => i < s.Length && (s[i] & 0xC0) == 0x80;
+        if (b is >= 0xC2 and <= 0xDF && Cont(bytes, at + 1))
+            return b == 0xC2 && bytes[at + 1] < 0xA0 ? 0 : 2;   // C2 80–9F are control characters
+        if (b is >= 0xE0 and <= 0xEF && Cont(bytes, at + 1) && Cont(bytes, at + 2))
+        {
+            var b1 = bytes[at + 1];
+            if (b == 0xE0 && b1 < 0xA0) return 0;   // overlong
+            if (b == 0xED && b1 >= 0xA0) return 0;  // surrogates
+            return 3;
+        }
+        if (b is >= 0xF0 and <= 0xF4 && Cont(bytes, at + 1) && Cont(bytes, at + 2) && Cont(bytes, at + 3))
+        {
+            var b1 = bytes[at + 1];
+            if (b == 0xF0 && b1 < 0x90) return 0;
+            if (b == 0xF4 && b1 >= 0x90) return 0;
+            return 4;
+        }
+        return 0;
+    }
+
     private void FindStrings()
     {
         var n = Bytes.Length;
         var i = 0;
         while (i < n)
         {
-            if (!Printable(Bytes[i])) { i++; continue; }
+            var len = CharLength(Bytes, i);
+            if (len == 0) { i++; continue; }
             var j = i;
-            while (j < n && Printable(Bytes[j])) j++;
-            if (j - i >= MinString) AddString(i, j);
+            var chars = 0;
+            while (j < n && CharLength(Bytes, j) is var l and > 0) { j += l; chars++; }
+            if (chars >= MinString) AddString(i, j);
             i = j;
         }
     }
 
-    // A printable run [a, b) with its length prefix peeled off. A string NetSerializer writes
+    // The character starts of the text in [a, b), relative to a, plus the end; null for plain ASCII.
+    private int[]? CharStartsOf(int a, int b)
+    {
+        var starts = new List<int>();
+        var ascii = true;
+        for (var i = a; i < b; )
+        {
+            starts.Add(i - a);
+            var l = Math.Max(1, CharLength(Bytes, i));
+            if (l > 1) ascii = false;
+            i += l;
+        }
+        starts.Add(b - a);
+        return ascii ? null : starts.ToArray();
+    }
+
+    private ByteToken Str(int a, int b)
+        => new(ByteKind.Str, a, b - a) { Text = Classify(Encoding.UTF8.GetString(Bytes, a, b - a)), CharStarts = CharStartsOf(a, b) };
+
+    // A text run [a, b) with its length prefix peeled off. A string NetSerializer writes
     // outside the mapped table is 01, varint(utf8 bytes + 1), varint(chars), the bytes
     // (RobustMappedStringSerializer.WriteMappedString → Primitives.WritePrimitive(string)); the
     // varint bytes are printable from 32 on, so they may sit inside the run. Only that exact
@@ -113,7 +183,8 @@ internal sealed class ByteStream
             var start = p + n1 + n2;
             if (start < a || start >= b) continue;
             var len = b - start;
-            if (v1 != (uint)len + 1 || v2 != (uint)len) continue;
+            var chars = CharStartsOf(start, b)?.Length - 1 ?? len;
+            if (v1 != (uint)len + 1 || v2 != (uint)chars) continue;
             var from = p > 0 && Bytes[p - 1] == 1 && _at[p - 1] is null ? p - 1 : p;   // the "unmapped" marker
             if (Overlaps(from, start - from)) continue;   // a prefix byte that ends the run before
             Add(new ByteToken(ByteKind.Len, from, start - from) { Text = [new Span(len.ToString(), Tone.Muted)] });
@@ -121,8 +192,7 @@ internal sealed class ByteStream
             break;
         }
 
-        var text = Encoding.ASCII.GetString(Bytes, a, b - a);
-        Add(new ByteToken(ByteKind.Str, a, b - a) { Text = Classify(text) });
+        Add(Str(a, b));
         Strings++;
     }
 
@@ -230,7 +300,7 @@ internal sealed class ByteStream
         Tokens.Remove(str);
         ByteToken Piece(int from, int to)
         {
-            var t = new ByteToken(ByteKind.Str, from, to - from) { Text = Classify(Encoding.ASCII.GetString(Bytes, from, to - from)) };
+            var t = Str(from, to);
             Add(t);
             return t;
         }
@@ -388,7 +458,7 @@ internal sealed class ByteStream
                 else col += gap;
                 while (from < text.Length)
                 {
-                    if (col >= cols) NewLine(t.Offset + from);
+                    if (col >= cols) NewLine(t.ByteAt(from));
                     var take = Math.Min(cols - col, text.Length - from);
                     line!.Parts.Add((t, from, from + take, col));
                     col  += take;

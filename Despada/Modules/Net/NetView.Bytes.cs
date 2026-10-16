@@ -31,10 +31,22 @@ internal static partial class NetView
     private static FieldNode? _hoverField, _hoverFieldNext;
     private static FieldNode? _hoverRow, _hoverRowNext;
 
+    // A byte selection [SelA, SelB): dragged over bytes (hex) or runs (text), a double click takes
+    // a run, Ctrl+C copies it as hex, the right button offers the other forms.
+    private static int  _selA = -1, _selB = -1;
+    private static (int Start, int End) _hoverBytes = (-1, -1);   // under the mouse this frame
+    private static (int Start, int End) _pressBytes = (-1, -1);   // where the button went down
+    private static bool _dragged;
+    private static bool _bytesMenu;
+    private static int  _scrollToByte = -1;   // the finder jumped to a byte: the pane scrolls to its line once
+    private static long _scrollToByteSeq = -1;
+
     private static readonly string[] HexOf   = Enumerable.Range(0, 256).Select(i => i.ToString("x2")).ToArray();
 
     private static void ForgetStream()
     {
+        _selA = _selB = -1;
+        _pressBytes = (-1, -1);
         _stream = null;
         _streamSeq = -1;
         _streamSrc = null;
@@ -48,6 +60,9 @@ internal static partial class NetView
     private static void EnsureStream(Packet p, byte[] bytes)
     {
         if (_streamSeq == p.Seq && _stream is not null && ReferenceEquals(_streamSrc, bytes) && ReferenceEquals(_streamTree, _docTree)) return;
+        // Another packet: the old selection means nothing, unless a finder jump brought one for it.
+        if (_streamSeq != p.Seq && _scrollToByteSeq != p.Seq) { _selA = _selB = -1; _scrollToByte = -1; }
+        _scrollToByteSeq = -1;
         _streamSeq  = p.Seq;
         _streamSrc  = bytes;
         _streamTree = _docTree;
@@ -59,6 +74,8 @@ internal static partial class NetView
             _stream = ByteStream.Build(shown, null);
         }
         _lines = null;
+        if (_selB > shown.Length) { _selA = Math.Min(_selA, shown.Length - 1); _selB = shown.Length; }
+        if (_scrollToByte >= shown.Length) _scrollToByte = -1;
     }
 
     /// <summary>"bytes  326 B · 2 strings · 5 fields" with the hex | text switch at the right.</summary>
@@ -118,6 +135,7 @@ internal static partial class NetView
         var stream = _stream!;
 
         ByteToken? hover = null;
+        _hoverBytes = (-1, -1);
         if (_bytesText) DrawStream(stream, ref hover);
         else            DrawHexDump(stream, ref hover);
 
@@ -127,19 +145,119 @@ internal static partial class NetView
             ImGuiNET.ImGui.NewLine();
         }
 
+        SelectBytes(stream, hover);
         if (hover is not null)
         {
             _hoverFieldNext = hover.Field;
-            if (ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Left) && hover.Field is not null)
-                _selField = ReferenceEquals(_selField, hover.Field) ? null : hover.Field;
-            DrawByteTip(stream, hover);
+            if (!_dragged) DrawByteTip(stream, hover);
+        }
+        DrawBytesMenu(stream);
+    }
+
+    // Press and drag selects; a plain click (no drag) still picks the run's field; a double
+    // click takes the whole run; the right button selects the run under it (unless inside the
+    // selection) and opens the menu.
+    private static void SelectBytes(ByteStream stream, ByteToken? hover)
+    {
+        var over = _hoverBytes.Start >= 0;
+        if (over && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            _pressBytes = _hoverBytes;
+            _dragged = false;
+            if (ImGuiNET.ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) && hover is not null)
+            {
+                (_selA, _selB) = (hover.Offset, hover.End);
+                _pressBytes = (-1, -1);
+            }
+        }
+        if (_pressBytes.Start >= 0 && ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left) && over && _hoverBytes != _pressBytes)
+        {
+            _dragged = true;
+            _selA = Math.Min(_pressBytes.Start, _hoverBytes.Start);
+            _selB = Math.Max(_pressBytes.End, _hoverBytes.End);
+        }
+        if (_pressBytes.Start >= 0 && ImGuiNET.ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+        {
+            if (!_dragged)
+            {
+                _selA = _selB = -1;
+                if (hover?.Field is { } f) _selField = ReferenceEquals(_selField, f) ? null : f;
+            }
+            _pressBytes = (-1, -1);
+            _dragged = false;
+        }
+        if (over && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+        {
+            var inside = _selA >= 0 && _hoverBytes.Start >= _selA && _hoverBytes.End <= _selB;
+            if (!inside && hover is not null) (_selA, _selB) = (hover.Offset, hover.End);
+            if (_selA >= 0) _bytesMenu = true;
         }
     }
 
+    private static bool HasByteSelection => _selA >= 0 && _selB > _selA;
+
+    private static void DrawBytesMenu(ByteStream stream)
+    {
+        if (_bytesMenu) { _bytesMenu = false; ImGuiNET.ImGui.OpenPopup("##bytes-menu"); }
+        if (!Widgets.BeginMenu("##bytes-menu", 260f)) return;
+        if (!HasByteSelection) ImGuiNET.ImGui.CloseCurrentPopup();
+        else
+        {
+            var n = _selB - _selA;
+            Widgets.MenuCaption(n == 1 ? $"0x{_selA:x2} · 1 B" : $"0x{_selA:x2}–0x{_selB - 1:x2} · {n} B");
+            if (Widgets.MenuItem("copy hex", Icon.Copy)) Clipboard.Set(SelectionHex(stream));
+            if (Widgets.MenuItem("copy text", Icon.Copy)) Clipboard.Set(SelectionText(stream));
+            if (Widgets.MenuItem("copy as C# array", Icon.Copy)) Clipboard.Set(SelectionCSharp(stream));
+            if (Widgets.MenuItem("copy base64", Icon.Copy)) Clipboard.Set(Convert.ToBase64String(stream.Bytes, _selA, n));
+            Widgets.MenuSeparator();
+            if (Widgets.MenuItem("clear selection", Icon.Cross)) _selA = _selB = -1;
+        }
+        Widgets.EndMenu();
+    }
+
+    private static string SelectionHex(ByteStream stream)
+    {
+        var sb = new System.Text.StringBuilder();
+        for (var i = _selA; i < _selB; i++)
+        {
+            if (i > _selA) sb.Append((i - _selA) % 16 == 0 ? '\n' : ' ');
+            sb.Append(HexOf[stream.Bytes[i]]);
+        }
+        return sb.ToString();
+    }
+
+    // As the text mode shows it: strings as text, the rest as hex, run by run.
+    private static string SelectionText(ByteStream stream)
+    {
+        var parts = new List<string>();
+        foreach (var t in stream.Tokens)
+        {
+            if (t.End <= _selA) continue;
+            if (t.Offset >= _selB) break;
+            var from = Math.Max(t.Offset, _selA);
+            var to   = Math.Min(t.End, _selB);
+            if (t.Kind == ByteKind.Str) { var (c0, c1) = t.CharRange(from, to); parts.Add(t.PlainText[c0..c1]); }
+            else parts.Add(string.Join(' ', Enumerable.Range(from, to - from).Select(i => HexOf[stream.Bytes[i]])));
+        }
+        return string.Join(' ', parts);
+    }
+
+    private static string SelectionCSharp(ByteStream stream)
+    {
+        var sb = new System.Text.StringBuilder("new byte[] { ");
+        for (var i = _selA; i < _selB; i++)
+        {
+            if (i > _selA) sb.Append(", ");
+            sb.Append("0x").Append(HexOf[stream.Bytes[i]]);
+        }
+        return sb.Append(" }").ToString();
+    }
+
+    private static uint SelectionFill => Theme.ToU32(Theme.WithAlpha(Theme.P.Accent, 0.28f));
+
     private static void DrawByteTip(ByteStream stream, ByteToken t)
     {
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.PopupBg, Theme.P.Pop);
-        ImGuiNET.ImGui.BeginTooltip();
+        BeginTip();
         var range = t.Length == 1 ? $"0x{t.Offset:x2}" : $"0x{t.Offset:x2}–0x{t.End - 1:x2}";
         Text($"{range} · {t.Length} B", Theme.P.Muted);
         ImGuiNET.ImGui.NewLine();
@@ -153,7 +271,7 @@ internal static partial class NetView
         switch (t.Kind)
         {
             case ByteKind.Str:
-                Text($"string · {t.Length} chars", Theme.P.Muted);
+                Text(t.Chars == t.Length ? $"string · {t.Length} chars" : $"string · {t.Chars} chars · {t.Length} B", Theme.P.Muted);
                 ImGuiNET.ImGui.NewLine();
                 break;
             case ByteKind.Len:
@@ -169,8 +287,7 @@ internal static partial class NetView
                 ImGuiNET.ImGui.NewLine();
                 break;
         }
-        ImGuiNET.ImGui.EndTooltip();
-        ImGuiNET.ImGui.PopStyleColor();
+        EndTip();
     }
 
     // The background of a run: the selected field's bytes, the hovered field's, a string's tint.
@@ -205,8 +322,14 @@ internal static partial class NetView
         var ulCol   = Theme.ToU32(Theme.P.Accent);
         var fmt     = gutter == 7 ? "x6" : "x4";
 
-        foreach (var line in _lines)
+        for (var li = 0; li < _lines.Count; li++)
         {
+            var line = _lines[li];
+            if (_scrollToByte >= 0 && line.Offset <= _scrollToByte && (li + 1 == _lines.Count || _lines[li + 1].Offset > _scrollToByte))
+            {
+                ImGuiNET.ImGui.SetScrollHereY(0.3f);
+                _scrollToByte = -1;
+            }
             if (!ImGuiNET.ImGui.IsRectVisible(new Vector2(1f, rowH)))
             {
                 ImGuiNET.ImGui.Dummy(new Vector2(1f, lineH));
@@ -223,7 +346,20 @@ internal static partial class NetView
                 var min = new Vector2(px, pos.Y);
                 var max = new Vector2(px + w, pos.Y + lineH);
                 if (RunFill(t) is { } fill) dl.AddRectFilled(min - new Vector2(0f, 1f * D), max + new Vector2(0f, 1f * D), Theme.ToU32(fill), 3f * D);
-
+                if (HasByteSelection && t.End > _selA && t.Offset < _selB)
+                {
+                    // A string's characters are its bytes: only the selected ones; other runs whole.
+                    var sMin = min; var sMax = max;
+                    if (t.Kind == ByteKind.Str)
+                    {
+                        var (r0, r1) = t.CharRange(_selA, _selB);
+                        var c0 = Math.Max(from, r0); var c1 = Math.Min(to, r1);
+                        if (c1 <= c0) goto text;
+                        sMin.X = px + (c0 - from) * cw; sMax.X = px + (c1 - from) * cw;
+                    }
+                    dl.AddRectFilled(sMin - new Vector2(0f, 1f * D), sMax + new Vector2(0f, 1f * D), SelectionFill, 3f * D);
+                }
+                text:
                 if (t.Kind == ByteKind.Str)
                 {
                     // The slice [from, to) of the string, span by span.
@@ -251,7 +387,15 @@ internal static partial class NetView
                 }
 
                 if (canHover && mouse.X >= min.X && mouse.X < max.X && mouse.Y >= min.Y && mouse.Y < max.Y)
+                {
                     hover = t;
+                    if (t.Kind == ByteKind.Str)
+                    {
+                        var c = from + (int)((mouse.X - px) / cw);
+                        _hoverBytes = (t.ByteAt(c), t.ByteAt(c + 1));
+                    }
+                    else _hoverBytes = (t.Offset, t.End);
+                }
             }
             ImGuiNET.ImGui.Dummy(new Vector2(MathF.Max(1f, avail), lineH));
         }
@@ -287,6 +431,7 @@ internal static partial class NetView
 
         for (var off = 0; off < bytes.Length; off += per)
         {
+            if (_scrollToByte >= off && _scrollToByte < off + per) { ImGuiNET.ImGui.SetScrollHereY(0.3f); _scrollToByte = -1; }
             if (!ImGuiNET.ImGui.IsRectVisible(new Vector2(1f, rowH)))
             {
                 ImGuiNET.ImGui.Dummy(new Vector2(1f, lineH));
@@ -312,6 +457,11 @@ internal static partial class NetView
                     var ext = t!.End > i + 1 && k < n - 1 ? cw + stretch + (k % 8 == 7 ? cw : 0f) : 0f;
                     dl.AddRectFilled(hexMin - new Vector2(0f, 1f * D), hexMax + new Vector2(ext, 1f * D), u);
                 }
+                if (i >= _selA && i < _selB)
+                {
+                    var ext = i + 1 < _selB && k < n - 1 ? cw + stretch + (k % 8 == 7 ? cw : 0f) : 0f;
+                    dl.AddRectFilled(hexMin - new Vector2(0f, 1f * D), hexMax + new Vector2(ext, 1f * D), SelectionFill);
+                }
 
                 var tone = t?.Kind switch
                 {
@@ -324,8 +474,11 @@ internal static partial class NetView
                 dl.AddText(hexMin, Theme.ToU32(tone), HexOf[bytes[i]]);
                 if (t?.Kind == ByteKind.Num) Gfx.HLine(dl, x, x + 2f * cw + (t.End > i + 1 && k < n - 1 ? cw + stretch + (k % 8 == 7 ? cw : 0f) : 0f), pos.Y + lineH - 1f * D, ulCol);
 
-                if (canHover && t is not null && mouse.Y >= pos.Y && mouse.Y < pos.Y + lineH && mouse.X >= hexMin.X && mouse.X < hexMax.X)
+                if (canHover && mouse.Y >= pos.Y && mouse.Y < pos.Y + lineH && mouse.X >= hexMin.X && mouse.X < hexMax.X + cw + stretch)
+                {
                     hover = t;
+                    _hoverBytes = (i, i + 1);
+                }
             }
             ImGuiNET.ImGui.Dummy(new Vector2(MathF.Max(1f, avail), lineH));
         }

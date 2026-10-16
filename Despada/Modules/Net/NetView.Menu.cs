@@ -88,6 +88,8 @@ internal static partial class NetView
         if (types.Count == 1 && Widgets.MenuItem($"only type:{types[0]}", Icon.Funnel)) AddFilter($"type:{types[0]}");
         if (Widgets.MenuItem(types.Count == 1 ? $"hide type:{types[0]}" : $"hide these {types.Count} types", Icon.Funnel))
             foreach (var t in types) AddFilter($"-type:{t}");
+        if (Widgets.MenuItem(types.Count == 1 ? $"mute type:{types[0]}" : $"mute these {types.Count} types", dot: Theme.P.Muted))
+            foreach (var t in types) MuteType(t);
         foreach (var id in _menuShared)
             if (Widgets.MenuItem($"with entity {id}##e{id}", Icon.Funnel)) AddFilter($"entity:{id}");
         Widgets.MenuSeparator();
@@ -107,8 +109,7 @@ internal static partial class NetView
         if (Widgets.MenuItem("save…", enabled: kept)) SaveDoc(p);
         Widgets.MenuSeparator();
 
-        // A rule for this type and direction, in the action's colour.
-        Widgets.MenuCaption(type);
+        Widgets.MenuCaption(NetCapture.TypeHint(type) is { Length: > 0 } hint ? $"{type}   {hint}" : type);
         if (Widgets.MenuItem("block", dot: Theme.P.Red)) AddRule(p, RuleAction.Block);
         if (Widgets.MenuItem("freeze", dot: Theme.P.Accent)) AddRule(p, RuleAction.Freeze);
         if (Widgets.MenuItem("dup ×3", dot: Theme.P.Accent2)) AddRule(p, RuleAction.Duplicate);
@@ -123,8 +124,9 @@ internal static partial class NetView
             Clipboard.Set(string.Join("\n", NetDecode.HexLines(bytes!).Select(l => $"{l.Offset}  {l.Hex} {l.Ascii}")));
         Widgets.MenuSeparator();
 
-        if (Widgets.MenuItem($"only type:{type}", Icon.Funnel)) AddFilter($"type:{type}");
         if (Widgets.MenuItem($"hide type:{type}", Icon.Funnel)) AddFilter($"-type:{type}");
+        if (Widgets.MenuItem($"mute type:{type}", dot: Theme.P.Muted)) MuteType(type);
+        if (Widgets.MenuItem($"only type:{type}", Icon.Funnel)) AddFilter($"type:{type}");
         if (Widgets.MenuItem($"only tick {p.Tick}", Icon.Funnel)) AddFilter($"tick:{p.Tick}");
         foreach (var id in p.Entities ?? [])
             if (Widgets.MenuItem($"with entity {id}##e{id}", Icon.Funnel)) AddFilter($"entity:{id}");
@@ -139,17 +141,12 @@ internal static partial class NetView
 
     private static void FieldMenu(Packet p, FieldNode node)
     {
-        // The value part of the row: everything after the name.
-        // Rows without a name (lines of a text, "… more") are all value.
         var value = string.Concat(node.Text.Skip(node.Depth == 0 || node.Name.Length == 0 || node.Name == "…" ? 0 : 1)
             .Select(s => s.Text)).Trim();
         var entity = node.Value?.GetType().Name == "NetEntity" ? NetDecode.Read(node.Value, "Id") as int? : null;
 
-        // A long or multi-line string: the whole of it, not the shortened row.
         if (Widgets.MenuItem("copy value", Icon.Copy)) Clipboard.Set(node.Value as string ?? value);
         if (node.CanExpand && Widgets.MenuItem("copy as text", Icon.Copy)) Clipboard.Set(NetDecode.ToText(node));
-        // Only offered when the filter keeps this packet: entity: knows the entities of MsgEntity
-        // events, free text searches the type and summary.
         if (entity is { } id && p.Entities?.Contains(id) == true)
         {
             if (Widgets.MenuItem($"with entity {id}", Icon.Funnel)) AddFilter($"entity:{id}");

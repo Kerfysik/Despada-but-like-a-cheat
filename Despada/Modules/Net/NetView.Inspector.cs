@@ -149,6 +149,7 @@ internal static partial class NetView
             ExpandDefault(_docTree, 1);
             _related = null;
             _selField = null;
+            _scrollToField = null;
         }
         var bytes = p.Bytes;
         if (bytes is not null) EnsureStream(p, bytes);   // before the head reads its counts

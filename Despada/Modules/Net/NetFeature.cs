@@ -20,10 +20,13 @@ internal sealed class NetFeature : Feature
     public override IReadOnlyList<Binding> Requires =>
     [
         Engine.NetCoreSend, Engine.NetDispatch, Engine.NetTiming, Engine.LgLengthBytes, Engine.LgInDelivery,
-        Engine.LgInSeqChannel, Engine.MsgDelivery, Engine.MsgSeqChannel, Engine.TimingCurTick, Engine.GameTickValue,
+        Engine.MsgDelivery, Engine.TimingCurTick, Engine.GameTickValue,
         Engine.MsgEntitySystem, Engine.MsgStateState, Engine.GameStateTo, Engine.GameStateEnts,
         Engine.NetClientSend, Engine.NetDispatchLocal,
     ];
+
+    // The sequence channel (engines from 2026-01) only feeds the inspector's " · channel N" note.
+    public override IReadOnlyList<Binding> Optional => [Engine.MsgSeqChannel, Engine.LgInSeqChannel];
 
     // Wall-clock anchor for packet times (Stopwatch → local time).
     public static DateTime AnchorTime { get; private set; } = DateTime.Now;
@@ -38,13 +41,17 @@ internal sealed class NetFeature : Feature
         AnchorTime  = DateTime.Now;
         AnchorStamp = Stopwatch.GetTimestamp();
         NetCapture.Capacity = Setting("buffer", 20000);
+        NetCapture.KeepPerType = Math.Clamp(Setting("keepPerType", 1000), 50, 100_000);
         NetCapture.Install();
         Lifecycle.OnTick(Id, Tick);
         LoadSaved();
+        LoadRules();
+        NetView.RegisterFinder();
     }
 
     protected internal override void OnDisable()
     {
+        NetView.UnregisterFinder();
         NetActive.Reset();
         NetCapture.Paused = false;
         NetCapture.ReleaseMessages();
@@ -52,7 +59,20 @@ internal sealed class NetFeature : Feature
         NetView.Forget();
     }
 
-    // Saved packets live in the feature's settings ("saved"); rules and the arm switch do not.
+    // Saved packets and pinned rules live in the feature's settings; the arm switch does not.
+    private void LoadRules()
+    {
+        NetActive.Rules.RemoveAll(r => r.Pinned);
+        foreach (var dto in Setting<List<NetRule.Dto>>("rules", []))
+            NetActive.Rules.Add(NetRule.FromDto(dto));
+    }
+
+    internal static void StoreRules()
+    {
+        if (Features.Find(NetCapture.Owner) is NetFeature f)
+            f.SetSetting("rules", NetActive.Rules.Where(r => r.Pinned).Select(r => r.ToDto()).ToList());
+    }
+
     private void LoadSaved()
     {
         NetActive.Saved.Clear();
@@ -62,13 +82,20 @@ internal sealed class NetFeature : Feature
 
     internal static void StoreSaved()
     {
-        if (Features.Find(NetCapture.Owner) is NetFeature f)
-            f.SetSetting("saved", NetActive.Saved.Select(s => s.ToDto()).ToList());
+        if (Features.Find(NetCapture.Owner) is not NetFeature f) return;
+        var dtos = new List<SavedPacket.Dto>();
+        foreach (var s in NetActive.Saved)
+        {
+            try { dtos.Add(s.ToDto()); }
+            catch (Exception ex) { Log.Warn("net", $"saved {s.Name}: not written: {ex.Message}"); }
+        }
+        f.SetSetting("saved", dtos);
     }
 
     private static void Tick()
     {
         NetActive.Pump();
+        NetView.IndexPump();
         TrafficHistory.Sample(NetCapture.WireIn, NetCapture.WireOut);
         var now = Stopwatch.GetTimestamp();
         var dt  = (now - _lastSample) / (double)Stopwatch.Frequency;
@@ -114,5 +141,11 @@ internal sealed class NetFeature : Feature
     {
         NetCapture.Capacity = size;
         SetSetting("buffer", NetCapture.Capacity);
+    }
+
+    internal static void SetKeepPerType(int n)
+    {
+        NetCapture.KeepPerType = Math.Clamp(n, 50, 100_000);
+        if (Features.Find(NetCapture.Owner) is NetFeature f) f.SetSetting("keepPerType", NetCapture.KeepPerType);
     }
 }

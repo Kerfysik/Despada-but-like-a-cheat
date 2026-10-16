@@ -21,8 +21,9 @@ internal static class DraftBuilder
 
     /// <summary>
     /// The object to send: a copy of the captured one with the draft's fields set when the draft
-    /// came from a packet (so fields the editor can't show keep their values), else a new instance.
-    /// For a BUI draft of a captured packet the result is the wrap message with the copied inner one.
+    /// came from a packet (so fields the editor can't show keep their values) — the live object
+    /// while the log still holds it, else one rebuilt from the draft's snapshot — else a new
+    /// instance. For a BUI draft the result is the wrap message with the copied inner one.
     /// </summary>
     public static object Build(PacketDraft d, out bool isBuiWrap)
     {
@@ -45,6 +46,9 @@ internal static class DraftBuilder
             }
         }
 
+        if (original is null && d.Source is not null) original = Rebuild(d.Source, d.Type, "the packet");
+        if (wrap is null && d.Wrap is not null && d.TypeName.StartsWith("BUI.", StringComparison.Ordinal)) wrap = Rebuild(d.Wrap, null, "the BUI wrap");
+
         var obj = original is not null && original.GetType() == d.Type ? Clone(original) : Create(d.Type);
         Apply(obj, d.Root.Children, setAll: original is null);
 
@@ -58,6 +62,17 @@ internal static class DraftBuilder
             return wrap;
         }
         return obj;
+    }
+
+    // The packet is gone from the log and its snapshot can't be rebuilt in full: better no send
+    // than one with silently emptied fields.
+    private static object Rebuild(ObjectSnapshot.Node node, Type? type, string what)
+    {
+        try { return ObjectSnapshot.Materialize(node, type) ?? throw new InvalidOperationException("nothing came back"); }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"can't rebuild {what} from its snapshot: {ex.Message}", ex);
+        }
     }
 
     /// <summary>Sets "path=value" on an object (the modify rule); false with a reason when it can't.</summary>
@@ -91,6 +106,16 @@ internal static class DraftBuilder
                 f.Field.SetValue(target, child);   // a struct comes back boxed: written back
                 continue;
             }
+            if (f.Kind == DraftKind.List)
+            {
+                if (!setAll && !f.AnyChanged()) continue;   // untouched: the original list stays as it is
+                try { f.Field.SetValue(target, BuildList(f)); }
+                catch (Exception ex) when (ex is not InvalidOperationException)
+                {
+                    throw new InvalidOperationException($"{f.Name}: {ex.Message}", ex);
+                }
+                continue;
+            }
             if (!setAll && !f.Changed) continue;
             try
             {
@@ -103,11 +128,56 @@ internal static class DraftBuilder
         }
     }
 
+    // A list from its item rows: leaves parsed, objects from their source (edits on top) or new.
+    private static object BuildList(DraftField list)
+    {
+        var et    = list.ElementType ?? throw new InvalidOperationException($"{list.Name}: no item type");
+        var items = Array.CreateInstance(et, list.Children.Count);
+        for (var i = 0; i < list.Children.Count; i++)
+        {
+            var item = list.Children[i];
+            object? value;
+            if (item.Kind == DraftKind.Node)
+            {
+                var child = item.Source is { } src ? (et.IsValueType ? src : Clone(src)) : Create(Nullable.GetUnderlyingType(et) ?? et);
+                Apply(child, item.Children, setAll: item.Source is null);
+                value = child;
+            }
+            else if (item.Kind == DraftKind.Readonly) value = item.Source;
+            else value = Parse(item.Value, et, item.Kind);
+            items.SetValue(value, i);
+        }
+        return ObjectSnapshot.MakeCollection(list.Field!.FieldType, et, items);
+    }
+
     private static void SetPath(object target, string[] path, int i, string value)
     {
-        var f = NetDecode.FieldsOf(target.GetType()).FirstOrDefault(x => NetDecode.DisplayName(x) == path[i])
-                ?? throw new InvalidOperationException($"no field {path[i]} on {target.GetType().Name}");
-        if (i == path.Length - 1)
+        // "Name" or "Name[index]" (an array or list element).
+        var seg = path[i];
+        int? index = null;
+        var br = seg.IndexOf('[');
+        if (br > 0 && seg.EndsWith(']'))
+        {
+            index = int.Parse(seg.AsSpan(br + 1, seg.Length - br - 2), CultureInfo.InvariantCulture);
+            seg = seg[..br];
+        }
+        var f = NetDecode.FieldsOf(target.GetType()).FirstOrDefault(x => NetDecode.DisplayName(x) == seg)
+                ?? throw new InvalidOperationException($"no field {seg} on {target.GetType().Name}");
+        var last = i == path.Length - 1;
+
+        if (index is { } at)
+        {
+            if (f.GetValue(target) is not System.Collections.IList list)
+                throw new InvalidOperationException($"{seg} is not a list");
+            if (at < 0 || at >= list.Count) throw new InvalidOperationException($"{seg} has {list.Count} items, not {at + 1}");
+            var et = f.FieldType.IsArray ? f.FieldType.GetElementType()! : list[at]?.GetType() ?? typeof(object);
+            if (last) { list[at] = Parse(value, et, KindOf(et)); return; }
+            var item = list[at] ?? Create(et);
+            SetPath(item, path, i + 1, value);
+            list[at] = item;   // a struct element comes back boxed: written back
+            return;
+        }
+        if (last)
         {
             f.SetValue(target, Parse(value, f.FieldType, KindOf(f.FieldType)));
             return;

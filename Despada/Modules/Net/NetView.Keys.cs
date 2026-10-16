@@ -253,6 +253,7 @@ internal static partial class NetView
             if (Key(ImGuiKey.C, false) && ActiveDoc() is { } p)
             {
                 if (shift) { if (p.Bytes is { } b) Clipboard.Set(HexText(b)); }
+                else if (HasByteSelection && _stream is { } s) Clipboard.Set(SelectionHex(s));
                 else if (p.Message is not null) Clipboard.Set(NetDecode.ToText(NetDecode.Root(p)));
             }
             return;

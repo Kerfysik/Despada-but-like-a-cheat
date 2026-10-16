@@ -50,7 +50,25 @@ internal static class NetActive
     public static readonly List<SavedPacket> Saved = new();
 
     // Counts for the status line.
-    public static int BlockedCount, CustomCount;
+    public static int BlockedCount, CustomCount, MutedCount;
+
+    /// <summary>
+    /// A mute rule matches: the packet is not logged (it still goes through, and the other rules
+    /// still see it). Passive, so it works unarmed and on our own packets too. On the hot path
+    /// for every packet: no copy of the list (the hooks and the UI share the main thread).
+    /// </summary>
+    public static bool IsMuted(Packet p)
+    {
+        for (var i = 0; i < Rules.Count; i++)
+        {
+            var r = Rules[i];
+            if (r.Action != RuleAction.Mute || !r.Matches(p)) continue;
+            Interlocked.Increment(ref r.Hits);
+            Interlocked.Increment(ref MutedCount);
+            return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// The rules on a packet just captured. The first enabled rule whose filter matches decides:
@@ -59,12 +77,32 @@ internal static class NetActive
     /// the UI and the scheduler all run on the main thread; the snapshot of the rules keeps this
     /// safe should a send ever come from another thread.
     /// </summary>
+    /// <summary>A logged packet an enabled mute rule would mute now: the list leaves it out.</summary>
+    public static bool IsMutedForView(Packet p)
+    {
+        for (var i = 0; i < Rules.Count; i++)
+        {
+            var r = Rules[i];
+            if (r.Action == RuleAction.Mute && r.Matches(p)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Changes with the mute rules: part of the list's filter key.</summary>
+    public static string MuteKey()
+    {
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < Rules.Count; i++)
+            if (Rules[i].Action == RuleAction.Mute && Rules[i].Enabled) sb.Append(Rules[i].Filter).Append('|');
+        return sb.ToString();
+    }
+
     public static bool Apply(Packet p)
     {
         if (!Armed || p.Ours) return true;
         NetRule? hit = null;
         foreach (var r in Rules.ToArray())
-            if (r.Matches(p)) { hit = r; break; }
+            if (r.Action != RuleAction.Mute && r.Matches(p)) { hit = r; break; }
         if (hit is null) return true;
 
         Interlocked.Increment(ref hit.Hits);
@@ -137,7 +175,7 @@ internal static class NetActive
         }
         NetRule? hit = null;
         foreach (var r in Rules.ToArray())
-            if (r.Matches(p)) { hit = r; break; }
+            if (r.Action != RuleAction.Mute && r.Matches(p)) { hit = r; break; }
         if (hit is null || hit.Action != RuleAction.Modify) return;
         _preModified = ApplyModify(hit, message);
     }
@@ -533,6 +571,7 @@ internal static class NetActive
     public static void Reset()
     {
         Armed = false;
+        MutedCount = 0;
         lock (Sync) _jobs.Clear();
         DropAll();
     }

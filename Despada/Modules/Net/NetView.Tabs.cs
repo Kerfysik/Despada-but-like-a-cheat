@@ -15,11 +15,11 @@ namespace Despada.Modules.Net;
 // open packets and drafts are closed with Ctrl+click or a middle click; + picks a type for a new packet.
 internal static partial class NetView
 {
-    private enum TabKind { List, Frozen, Saved, Packet, Draft }
+    private enum TabKind { List, Frozen, Saved, Packet, Draft, Pick }
 
     private readonly record struct NetTab(TabKind Kind, long Seq = -1, PacketDraft? Draft = null)
     {
-        public bool Closable => Kind is TabKind.Packet or TabKind.Draft;
+        public bool Closable => Kind is TabKind.Packet or TabKind.Draft or TabKind.Pick;
     }
 
     private static TabKind _tabKind = TabKind.List;
@@ -57,6 +57,7 @@ internal static partial class NetView
         if (NetActive.Saved.Count > 0) tabs.Add(new NetTab(TabKind.Saved));
         foreach (var seq in _docs) tabs.Add(new NetTab(TabKind.Packet, seq));
         foreach (var d in _drafts) tabs.Add(new NetTab(TabKind.Draft, Draft: d));
+        if (_picking) tabs.Add(new NetTab(TabKind.Pick));
 
         active = 0;
         for (var i = 0; i < tabs.Count; i++)
@@ -80,6 +81,7 @@ internal static partial class NetView
         TabKind.Saved  => $"saved {NetActive.Saved.Count}",
         TabKind.Packet => NetCapture.Get(t.Seq) is { } p ? $"#{t.Seq} {Short(p.Inner ?? p.Type.Name)}" : $"#{t.Seq}",
         TabKind.Draft  => $"new {Short(t.Draft!.TypeName)}",
+        TabKind.Pick   => "new packet",
         _ => "",
     };
 
@@ -94,6 +96,7 @@ internal static partial class NetView
     {
         if (t.Kind == TabKind.Packet) CloseDoc(t.Seq);
         if (t.Kind == TabKind.Draft)  CloseDraft(t.Draft!);
+        if (t.Kind == TabKind.Pick)   ClosePicker();
     }
 
     /// <summary>After the traffic graph: the rules button and the tabs.</summary>
@@ -117,7 +120,7 @@ internal static partial class NetView
             ImGuiNET.ImGui.SetCursorPosY(y);
             var t = tabs[i];
             ImGuiNET.ImGui.PushID(i);
-            var tone = t.Kind switch { TabKind.Frozen => Theme.P.Accent, TabKind.Draft => Theme.P.Yellow, _ => (Vector4?)null };
+            var tone = t.Kind switch { TabKind.Frozen => Theme.P.Accent, TabKind.Draft or TabKind.Pick => Theme.P.Yellow, _ => (Vector4?)null };
             if (Powerline.Segment("##tab", labels[i], i == active, i == from, false, out var closeRequested, tone))
                 Activate(t);
             if (closeRequested)
@@ -135,8 +138,7 @@ internal static partial class NetView
 
         Powerline.After(10f * D);
         ImGuiNET.ImGui.SetCursorPosY(y);
-        if (Powerline.Plus("##new-packet")) ImGuiNET.ImGui.OpenPopup("##type-picker");
-        DrawTypePicker();
+        if (Powerline.Plus("##new-packet")) OpenPicker();
 
         ImGuiNET.ImGui.NewLine();
         if (close is { } c) CloseTab(c);

@@ -75,7 +75,8 @@ internal static partial class NetView
         var xFilter = Widgets.CheckboxSize + gap;
         var xAction = xFilter + filterW + gap;
         var xHits   = xAction + actionW + gap;
-        var xClose  = xHits + hitsW + 24f;
+        var xPin    = xHits + hitsW + 20f;
+        var xClose  = xPin + 22f + 10f;
         var rowW    = xClose + cw * 2f;
 
         if (rules.Count == 0)
@@ -86,6 +87,7 @@ internal static partial class NetView
         }
 
         NetRule? remove = null;
+        var store = false;
         for (var i = 0; i < rules.Count; i++)
         {
             var r   = rules[i];
@@ -95,7 +97,7 @@ internal static partial class NetView
 
             ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(pos.X, pos.Y + (RuleRowH - ImGuiNET.ImGui.GetFrameHeight()) * 0.5f));
             var on = r.Enabled;
-            if (Widgets.Checkbox("##on", ref on, ActionColor(r.Action))) r.Enabled = on;
+            if (Widgets.Checkbox("##on", ref on, ActionColor(r.Action))) { r.Enabled = on; store |= r.Pinned; }
             var alpha = on ? 1f : 0.55f;
 
             // The filter, coloured like the bar's tokens, clipped to its column.
@@ -122,6 +124,14 @@ internal static partial class NetView
             var hits = r.Hits.ToString();
             dl.AddText(new Vector2(pos.X + xHits + hitsW - ImGuiNET.ImGui.CalcTextSize(hits).X, ty), Theme.ToU32(Theme.WithAlpha(Theme.P.Muted, alpha)), hits);
 
+            // The pin: the rule comes back after a restart.
+            ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(pos.X + xPin, pos.Y + (RuleRowH - 22f) * 0.5f));
+            ImGuiNET.ImGui.InvisibleButton("##pin", new Vector2(22f, 22f));
+            if (ImGuiNET.ImGui.IsItemClicked()) { r.Pinned = !r.Pinned; store = true; }
+            var pinHot = Widgets.Hover(ImGuiNET.ImGui.GetItemID(), ImGuiNET.ImGui.IsItemHovered());
+            Widgets.DrawIcon(dl, pos + new Vector2(xPin + 11f, RuleRowH * 0.5f), 16f, Icon.Pin,
+                r.Pinned ? Theme.Mix(Theme.P.Accent, Theme.P.Fg, pinHot * 0.4f) : Theme.WithAlpha(Theme.P.Muted, 0.45f + 0.55f * pinHot), 1.6f);
+
             ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(pos.X + xClose, pos.Y));
             if (ImGuiNET.ImGui.InvisibleButton("##x", new Vector2(cw * 2f, RuleRowH))) remove = r;
             dl.AddText(new Vector2(pos.X + xClose + cw * 0.5f, ty), Theme.ToU32(ImGuiNET.ImGui.IsItemHovered() ? Theme.P.Fg : Theme.P.Muted), "×");
@@ -130,7 +140,8 @@ internal static partial class NetView
             ImGuiNET.ImGui.Dummy(new Vector2(rowW, RuleRowH));
             ImGuiNET.ImGui.PopID();
         }
-        if (remove is not null) rules.Remove(remove);
+        if (remove is not null) { rules.Remove(remove); store |= remove.Pinned; }
+        if (store) NetFeature.StoreRules();
     }
 
     private static float Put(ImDrawListPtr dl, float x, float y, string text, Vector4 color)
@@ -144,6 +155,24 @@ internal static partial class NetView
 
     private static string ActionText(NetRule r)
         => r.Detail.Length > 0 ? $"{r.ActionLabel}  {r.Detail}" : r.ActionLabel;
+
+    /// <summary>
+    /// Keeps a type out of the log (a mute rule, once per type). Its chips leave the view filter:
+    /// hidden or shown, a muted type has nothing left to show.
+    /// </summary>
+    private static void MuteType(string type)
+    {
+        _chips.RemoveAll(c => c.Key == "type" && c.Value == type);
+        var filter = $"type:={type}";   // exact: "MsgState" must not take MsgStateAck with it
+        if (NetActive.Rules.FirstOrDefault(r => r.Action == RuleAction.Mute && r.Filter == filter) is { } had)
+        {
+            had.Enabled = true;
+            return;
+        }
+        var r = new NetRule { Action = RuleAction.Mute };
+        r.SetFilter(filter);
+        NetActive.Rules.Add(r);
+    }
 
     /// <summary>Adds a rule for a packet's type from a menu ("Block this type").</summary>
     private static void AddRule(Packet p, RuleAction action)
@@ -169,6 +198,7 @@ internal static partial class NetView
         RuleAction.Block  => Theme.P.Red,
         RuleAction.Freeze => Theme.P.Accent,
         RuleAction.Modify => Theme.P.Yellow,
+        RuleAction.Mute   => Theme.P.Muted,
         _                 => Theme.P.Accent2,
     };
 }

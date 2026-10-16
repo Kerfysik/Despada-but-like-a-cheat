@@ -35,6 +35,38 @@ internal static class NetCapture
     private static readonly Queue<Packet> _kept = new();   // non-state packets still holding a message
     private static long _keptBytes;
 
+    // Per type (the event inside a MsgEntity counts as its own): the packets still in the ring,
+    // the total, and a one-second rate. Over the cap, the oldest of that type leaves the ring,
+    // so a chatty type can't push the others out.
+    public static int KeepPerType = 1000;
+
+    private sealed class TypeStat
+    {
+        public readonly LinkedList<Packet> Kept = new();
+        public long Total;
+        public long Second, InSecond, LastSecond;
+    }
+
+    private static readonly Dictionary<string, TypeStat> _types = new();
+    private static readonly Queue<long> _evicted = new();   // seqs removed before their turn, still inside the ring's window
+
+    // Evictions for the list to drop its rows: a running count and the latest seqs.
+    public static long EvictionCount { get; private set; }
+    private static readonly List<long> _evictLog = new();
+    private const int EvictLogMax = 8192;
+
+    /// <summary>The seqs evicted since <paramref name="sinceCount"/>; Complete is false when they're more than the log keeps.</summary>
+    public static (List<long> Seqs, bool Complete) EvictedSince(long sinceCount)
+    {
+        lock (_lock)
+        {
+            var n = EvictionCount - sinceCount;
+            if (n <= 0) return ([], true);
+            if (n > _evictLog.Count) return ([], false);
+            return (_evictLog.GetRange(_evictLog.Count - (int)n, (int)n), true);
+        }
+    }
+
     public static long TotalIn, TotalOut, BytesIn, BytesOut;
     /// <summary>Bytes seen on the wire, counted even while paused (the traffic graph); any thread.</summary>
     public static long WireIn, WireOut;
@@ -74,7 +106,38 @@ internal static class NetCapture
 
     public static long FirstSeq { get { lock (_lock) return First; } }
     public static long LastSeq  { get { lock (_lock) return _nextSeq - 1; } }
-    public static int  Count    { get { lock (_lock) return (int)(_nextSeq - First); } }
+    public static int  Count
+    {
+        get
+        {
+            lock (_lock)
+            {
+                while (_evicted.Count > 0 && _evicted.Peek() < First) _evicted.Dequeue();
+                return (int)(_nextSeq - First) - _evicted.Count;
+            }
+        }
+    }
+
+    /// <summary>How many packets of a type the ring holds, its one-second rate and its total; the key is the type as the list names it.</summary>
+    public static (int Kept, int PerSec, long Total) TypeStats(string type)
+    {
+        lock (_lock)
+        {
+            if (!_types.TryGetValue(type, out var t)) return (0, 0, 0);
+            while (t.Kept.First is { } f && f.Value.Seq < First) t.Kept.RemoveFirst();
+            var sec = Stopwatch.GetTimestamp() / Stopwatch.Frequency;
+            var rate = sec == t.Second ? t.LastSecond : sec == t.Second + 1 ? t.InSecond : 0;
+            return (t.Kept.Count, (int)rate, t.Total);
+        }
+    }
+
+    /// <summary>"4 607 · 30/s" for a type, or "" when none was seen.</summary>
+    public static string TypeHint(string type)
+    {
+        var (kept, perSec, total) = TypeStats(type);
+        if (total == 0) return "";
+        return perSec > 0 ? $"{kept:N0} · {perSec}/s" : $"{kept:N0}";
+    }
 
     private static long First => Math.Max(_first, _nextSeq - _ring.Length);
 
@@ -121,6 +184,9 @@ internal static class NetCapture
             _states.Clear();
             _kept.Clear();
             _keptBytes = 0;
+            _types.Clear();
+            _evicted.Clear();
+            _evictLog.Clear();
             _first = _nextSeq;
             TotalIn = TotalOut = BytesIn = BytesOut = 0;
         }
@@ -226,7 +292,7 @@ internal static class NetCapture
                 Size     = (int)(Engine.LgLengthBytes.Invoke(packet) ?? 0),
                 Bytes    = CopyBytes(packet),
                 Delivery = Convert.ToInt32(Engine.MsgDelivery.Invoke(message)),
-                Channel  = (int)(Engine.MsgSeqChannel.Invoke(message) ?? 0),
+                Channel  = Engine.MsgSeqChannel.Ok ? (int)(Engine.MsgSeqChannel.Invoke(message) ?? 0) : 0,
                 Tick     = CurrentTick(manager),
                 Message  = message,
             });
@@ -249,7 +315,7 @@ internal static class NetCapture
                 Size     = (int)(Engine.LgLengthBytes.Invoke(raw) ?? 0),
                 Bytes    = CopyBytes(raw),
                 Delivery = Convert.ToInt32(Engine.LgInDelivery.Invoke(raw)),
-                Channel  = (int)(Engine.LgInSeqChannel.Invoke(raw) ?? 0),
+                Channel  = Engine.LgInSeqChannel.Ok ? (int)(Engine.LgInSeqChannel.Invoke(raw) ?? 0) : 0,
                 Tick     = CurrentTick(manager),
                 Message  = message,
             };
@@ -286,8 +352,46 @@ internal static class NetCapture
         return tick is null ? 0 : (uint)(Engine.GameTickValue.Get(tick) ?? 0u);
     }
 
+    private static void CountType(Packet p)
+    {
+        var key = p.Inner ?? p.Type.Name;
+        if (!_types.TryGetValue(key, out var t)) _types[key] = t = new TypeStat();
+        t.Total++;
+        var sec = p.Stamp / Stopwatch.Frequency;
+        if (sec != t.Second)
+        {
+            t.LastSecond = sec == t.Second + 1 ? t.InSecond : 0;
+            t.Second = sec;
+            t.InSecond = 0;
+        }
+        t.InSecond++;
+        t.Kept.AddLast(p);
+        // Over the cap: the oldest of this type go (not one open in the inspector).
+        for (var node = t.Kept.First; node is not null && t.Kept.Count > KeepPerType; )
+        {
+            var next = node.Next;
+            var old  = node.Value;
+            if (old.Seq < First) t.Kept.Remove(node);
+            else if (!old.Pinned)
+            {
+                t.Kept.Remove(node);
+                if (_ring[old.Seq % _ring.Length] == old)
+                {
+                    _ring[old.Seq % _ring.Length] = null;
+                    _evicted.Enqueue(old.Seq);
+                    EvictionCount++;
+                    _evictLog.Add(old.Seq);
+                    if (_evictLog.Count > EvictLogMax) _evictLog.RemoveRange(0, EvictLogMax / 2);
+                }
+                Drop(old);
+            }
+            node = next;
+        }
+    }
+
     private static void Drop(Packet p, bool force = false)
     {
+        p.Index = null;   // first: an index being written right now must not outlive the message
         if (p.Message is null) return;
         if (p.Pinned && !force)
         {
@@ -365,8 +469,9 @@ internal static class NetCapture
         }
         if (!p.Ours) NetActive.Learn(p);
         Interlocked.Add(ref p.Dir == NetDir.In ? ref WireIn : ref WireOut, p.Size);
-        // Paused: nothing is logged, but the rules still act (pause means "stop writing", not "stop").
-        if (Paused) return NetActive.Apply(p);
+        // Paused, or muted by a rule: nothing is logged, but the rules still act (pause means
+        // "stop writing", not "stop"; mute keeps noise from pushing the rest out of the ring).
+        if (Paused || NetActive.IsMuted(p)) return NetActive.Apply(p);
         lock (_lock)
         {
             p.Seq = _nextSeq++;
@@ -374,6 +479,7 @@ internal static class NetCapture
 
             if (p.Dir == NetDir.In) { TotalIn++;  BytesIn  += p.Size; }
             else                    { TotalOut++; BytesOut += p.Size; }
+            CountType(p);
 
             // Memory: forget old message objects, and all but the newest few game states.
             // Their one-line summary is made first: it can't be made without the object.

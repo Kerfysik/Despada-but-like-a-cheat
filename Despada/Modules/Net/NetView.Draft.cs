@@ -16,8 +16,6 @@ internal static partial class NetView
     // Repeat settings of the footer, shared by every tab (they're rarely changed).
     private static int _sendTimes = 1, _sendEveryMs = 100;
 
-    private static string _typeSearch = "";
-    private static bool   _typeSearchFocus;
 
     // The entity hint list drawn last frame: a click on it is taken here, before the field it belongs
     // to loses focus to that click (and before any row under the list sees it).
@@ -98,30 +96,35 @@ internal static partial class NetView
         var shownBefore = _hintShown;
         _hintShown = false;
         var x0 = ImGuiNET.ImGui.GetCursorScreenPos().X - 2f * ImGuiNET.ImGui.CalcTextSize("M").X;
-        DrawDraftLevel(d.Root.Children, x0, 1, 0, editable);
+        DrawDraftLevel(d.Root.Children, null, x0, 1, 0, editable);
         if (shownBefore && !_hintShown) _hintField = null;
         if (!_hintShown) _hintHover = -1;
     }
 
-    private static void DrawDraftLevel(List<DraftField> fields, float x0, int depth, uint guides, bool editable)
+    private static void DrawDraftLevel(List<DraftField> fields, DraftField? parent, float x0, int depth, uint guides, bool editable)
     {
+        DraftField? remove = null;
         for (var i = 0; i < fields.Count; i++)
         {
             var f    = fields[i];
             var last = i == fields.Count - 1;
-            DrawDraftRow(f, x0, depth, guides, last, editable);
-            if (f.Kind == DraftKind.Node && f.Expanded)
-                DrawDraftLevel(f.Children, x0, depth + 1, depth <= 32 && !last ? guides | (1u << (depth - 1)) : guides, editable);
+            if (DrawDraftRow(f, parent, x0, depth, guides, last, editable)) remove = f;
+            if (f.Kind is DraftKind.Node or DraftKind.List && f.Expanded)
+                DrawDraftLevel(f.Children, f, x0, depth + 1, depth <= 32 && !last ? guides | (1u << (depth - 1)) : guides, editable);
         }
+        if (remove is not null && parent is not null) PacketDraft.RemoveItem(parent, remove);
     }
 
-    private static void DrawDraftRow(DraftField f, float x0, int depth, uint guides, bool last, bool editable)
+    // True when the row's × was clicked (a list item to remove).
+    private static bool DrawDraftRow(DraftField f, DraftField? parent, float x0, int depth, uint guides, bool last, bool editable)
     {
         var dl    = ImGuiNET.ImGui.GetWindowDrawList();
         var cw    = ImGuiNET.ImGui.CalcTextSize("M").X;
         var step  = cw * 2f;
         var lineH = ImGuiNET.ImGui.GetTextLineHeight();
-        var rowH  = editable && f.Kind is not (DraftKind.Node or DraftKind.Readonly)
+        var isItem = editable && parent is { Kind: DraftKind.List };
+        var remove = false;
+        var rowH  = editable && f.Kind is not (DraftKind.Node or DraftKind.List or DraftKind.Readonly)
             ? ImGuiNET.ImGui.GetFrameHeight() + 4f * D
             : ImGuiNET.ImGui.GetTextLineHeightWithSpacing();
         var pos   = ImGuiNET.ImGui.GetCursorScreenPos();
@@ -131,20 +134,32 @@ internal static partial class NetView
         ImGuiNET.ImGui.PushID(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(f));
         var x = x0 + depth * step;
 
-        // A node folds like a tree row; its name is the whole row's button.
-        if (f.Kind == DraftKind.Node)
+        // A node or list folds like a tree row; its name is the whole row's button. A list gets
+        // its count and, when editing, a + for a new item; an item node gets its ×.
+        if (f.Kind is DraftKind.Node or DraftKind.List)
         {
+            var label = f.Kind == DraftKind.List ? $"{TypeLabel(f)}  {f.Children.Count} items" : TypeLabel(f);
             ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x, pos.Y));
-            var w = step + ImGuiNET.ImGui.CalcTextSize(f.Name).X + cw * 2f + ImGuiNET.ImGui.CalcTextSize(TypeLabel(f)).X;
+            var w = step + ImGuiNET.ImGui.CalcTextSize(f.Name).X + cw * 2f + ImGuiNET.ImGui.CalcTextSize(label).X;
             if (ImGuiNET.ImGui.InvisibleButton("##node", new Vector2(w, lineH))) f.Expanded = !f.Expanded;
             var hov = ImGuiNET.ImGui.IsItemHovered();
             dl.AddText(new Vector2(x, textY), Theme.ToU32(hov ? Theme.P.Fg : Theme.P.Muted), f.Expanded ? "▾" : "▸");
             dl.AddText(new Vector2(x + step, textY), Theme.ToU32(Theme.P.Muted), f.Name);
-            dl.AddText(new Vector2(x + step + ImGuiNET.ImGui.CalcTextSize(f.Name).X + cw * 2f, textY), Theme.ToU32(Theme.P.Accent2), TypeLabel(f));
+            var lx = x + step + ImGuiNET.ImGui.CalcTextSize(f.Name).X + cw * 2f;
+            dl.AddText(new Vector2(lx, textY), Theme.ToU32(f.Kind == DraftKind.List && f.Touched ? Theme.P.Accent2 : Theme.P.Accent2), label);
+            lx += ImGuiNET.ImGui.CalcTextSize(label).X + cw;
+            if (editable && f.Kind == DraftKind.List && f.ElementType is not null)
+            {
+                ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(lx, pos.Y));
+                if (ImGuiNET.ImGui.InvisibleButton("##add", new Vector2(cw * 2f, lineH))) { PacketDraft.AddItem(f).Expanded = true; f.Expanded = true; }
+                dl.AddText(new Vector2(lx + cw * 0.5f, textY), Theme.ToU32(ImGuiNET.ImGui.IsItemHovered() ? Theme.P.Fg : Theme.P.Muted), "+");
+                lx += cw * 2f;
+            }
+            if (isItem) remove = RemoveMark(dl, lx, pos.Y, textY, lineH, cw);
             ImGuiNET.ImGui.SetCursorScreenPos(pos);
             ImGuiNET.ImGui.Dummy(new Vector2(1f, rowH - ImGuiNET.ImGui.GetStyle().ItemSpacing.Y));
             ImGuiNET.ImGui.PopID();
-            return;
+            return remove;
         }
 
         // Name, padded like the field tree, then the value.
@@ -172,7 +187,7 @@ internal static partial class NetView
             ImGuiNET.ImGui.SetCursorScreenPos(pos);
             ImGuiNET.ImGui.Dummy(new Vector2(1f, rowH - ImGuiNET.ImGui.GetStyle().ItemSpacing.Y));
             ImGuiNET.ImGui.PopID();
-            return;
+            return false;
         }
 
         // The control.
@@ -238,13 +253,29 @@ internal static partial class NetView
             ImGuiNET.ImGui.SetCursorPosY(ImGuiNET.ImGui.GetCursorPosY() + 2f * D);
             Text($"was {f.Original}", Theme.P.Muted);
         }
+        if (isItem)
+        {
+            ImGuiNET.ImGui.SameLine(0f, 10f * D);
+            var rx = ImGuiNET.ImGui.GetCursorScreenPos().X;
+            remove = RemoveMark(dl, rx, pos.Y, textY, lineH, cw);
+        }
         ImGuiNET.ImGui.NewLine();   // Text() leaves the line open (SameLine): close it, else the row's Dummy inherits the control's line
         ImGuiNET.ImGui.SetCursorScreenPos(pos);
         ImGuiNET.ImGui.Dummy(new Vector2(1f, rowH - ImGuiNET.ImGui.GetStyle().ItemSpacing.Y));
         ImGuiNET.ImGui.PopID();
+        return remove;
     }
 
-    private static string TypeLabel(DraftField f) => f.Type?.Name ?? "";
+    // The × that removes a list item; true when clicked.
+    private static bool RemoveMark(ImDrawListPtr dl, float x, float y, float textY, float lineH, float cw)
+    {
+        ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x, y));
+        var clicked = ImGuiNET.ImGui.InvisibleButton("##remove", new Vector2(cw * 2f, lineH));
+        dl.AddText(new Vector2(x + cw * 0.5f, textY), Theme.ToU32(ImGuiNET.ImGui.IsItemHovered() ? Theme.P.Red : Theme.P.Muted), "×");
+        return clicked;
+    }
+
+    private static string TypeLabel(DraftField f) => NetDecode.TypeLabel(f.Type) ?? "";
 
     // A few known entity ids starting with what's typed; the click is read next frame (DrawDraftRows).
     private static void DrawEntityHints(DraftField f, Vector2 at)
@@ -327,79 +358,174 @@ internal static partial class NetView
 
 
 
-    // ── the type picker ──────────────────────────────────────────────────────────────────────
+    // ── the type picker: the "new packet" tab before a type is chosen ─────────────────────
 
-    private static void DrawTypePicker()
+    private static bool   _picking;
+    private static string _pickText = "";
+    private static bool   _pickFocus;
+    private static int    _pickSel;
+    private static bool   _pickScroll;
+    private static readonly List<string> _recentTypes = new();
+    private const int RecentMax = 6;
+
+    private static void OpenPicker()
     {
-        ImGuiNET.ImGui.SetNextWindowSizeConstraints(new Vector2(560f * D, 0f), new Vector2(760f * D, 700f * D));
-        if (!ImGuiNET.ImGui.BeginPopup("##type-picker"))
+        _picking   = true;
+        _pickText  = "";
+        _pickSel   = 0;
+        _pickFocus = true;
+        _tabKind   = TabKind.Pick;
+    }
+
+    private static void ClosePicker()
+    {
+        _picking = false;
+        if (_tabKind == TabKind.Pick) ShowList();
+    }
+
+    private static void PickType(string name)
+    {
+        if (PacketDraft.ForType(name) is not { } d)
         {
-            _typeSearch = "";
+            ImGuiRenderer.ShowToast("network", $"{name}: type not found", 2f);
             return;
         }
-        // The search gets the caret the frame the popup appears (and the next, in case focus is late).
-        if (ImGuiNET.ImGui.IsWindowAppearing()) _typeSearchFocus = true;
-        if (_typeSearchFocus)
-        {
-            ImGuiNET.ImGui.SetKeyboardFocusHere();
-            _typeSearchFocus = false;
-        }
-        ImGuiNET.ImGui.AlignTextToFramePadding();
-        Text("› ", Theme.P.Accent);
-        ImGuiNET.ImGui.SameLine(0f, 0f);
-        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBg, Theme.P.Deep);
-        ImGuiNET.ImGui.SetNextItemWidth(-1f);
-        var enter = ImGuiNET.ImGui.InputText("##type-search", ref _typeSearch, 128, ImGuiInputTextFlags.EnterReturnsTrue);
-        ImGuiNET.ImGui.PopStyleColor();
+        _recentTypes.Remove(name);
+        _recentTypes.Insert(0, name);
+        if (_recentTypes.Count > RecentMax) _recentTypes.RemoveAt(_recentTypes.Count - 1);
+        _picking = false;
+        ShowDraft(d);
+    }
+
+    private static void DrawPickTab(float width, float height)
+    {
+        BeginPanel("##pick", width, height);
+        var dl    = ImGuiNET.ImGui.GetWindowDrawList();
+        var pos   = ImGuiNET.ImGui.GetCursorScreenPos();
+        var w     = ImGuiNET.ImGui.GetContentRegionAvail().X;
+        var h     = ImGuiNET.ImGui.GetFrameHeight();
+        var pad   = ImGuiNET.ImGui.GetStyle().FramePadding;
+        var lineH = ImGuiNET.ImGui.GetTextLineHeight();
+        var small = ImGuiNET.ImGui.GetFontSize() * 0.8f;
+        var font  = ImGuiNET.ImGui.GetFont();
 
         var all = NetTypes.All;
-        if (all.Count == 0)
-        {
-            PanelCaption(NetTypes.Failed ? "reading the types failed" : "reading the types…");
-            ImGuiNET.ImGui.EndPopup();
-            return;
-        }
-        var q = _typeSearch.Trim();
-        var hits = all.Where(t => t.Name.Contains(q, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(t => t.Name.StartsWith(q, StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(t => t.Name, StringComparer.Ordinal)
-            .ToList();
-        string? pick = enter && hits.Count > 0 ? hits[0].Name : null;
+        var q   = _pickText.Trim();
+        List<(string Name, NetTypes.Kind Kind)> hits;
+        if (q.Length == 0)
+            hits = _recentTypes.Select(n => (n, all.FirstOrDefault(t => t.Name == n).Kind)).Where(t => all.Any(a => a.Name == t.n)).ToList();
+        else
+            hits = all.Where(t => t.Name.Contains(q, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(t => t.Name.StartsWith(q, StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(t => t.Name, StringComparer.Ordinal)
+                .ToList();
+        var recentN = q.Length == 0 ? hits.Count : 0;
+        if (q.Length == 0) hits.AddRange(all.OrderBy(t => t.Name, StringComparer.Ordinal));
 
-        // Every type, in a scrolling list (over a thousand without a search).
-        ImGuiNET.ImGui.BeginChild("##type-list", new Vector2(-1f, MathF.Min(hits.Count + 3, 16) * ImGuiNET.ImGui.GetTextLineHeightWithSpacing()),
-            ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollWithMouse);
+        // The search field, as the bar: › prompt, a hairline, the focus ring; the count at the right.
+        var bMin = UiScale.Snap(pos);
+        var bMax = UiScale.Snap(pos + new Vector2(w, h));
+        dl.AddRectFilled(bMin, bMax, Theme.ToU32(Theme.P.Deep), 10f * D);
+        var x = pos.X + 12f * D;
+        dl.AddText(new Vector2(x, pos.Y + pad.Y), Theme.ToU32(Theme.P.Accent), "›");
+        x += ImGuiNET.ImGui.CalcTextSize("›").X + 10f * D;
+        var count  = all.Count == 0 ? (NetTypes.Failed ? "reading the types failed" : "reading the types…")
+                   : q.Length == 0 ? $"{all.Count:N0}" : $"{hits.Count:N0} of {all.Count:N0}";
+        var countW = ImGuiNET.ImGui.CalcTextSize(count).X * 0.8f;
+        dl.AddText(font, small, new Vector2(bMax.X - 14f * D - countW, pos.Y + (h - small) * 0.5f), Theme.ToU32(Theme.P.Muted), count);
+
+        ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x, pos.Y));
+        ImGuiNET.ImGui.SetNextItemWidth(MathF.Max(bMax.X - countW - 28f * D - x, 40f));
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBg, Vector4.Zero);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, Vector4.Zero);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBgActive, Vector4.Zero);
+        if (_pickFocus) { ImGuiNET.ImGui.SetKeyboardFocusHere(); _pickFocus = false; }
+        var io   = ImGuiNET.ImGui.GetIO();
+        var keep = io.ConfigInputTextEnterKeepActive;
+        io.ConfigInputTextEnterKeepActive = true;
+        var before = _pickText;
+        var enter  = ImGuiNET.ImGui.InputText("##pick-search", ref _pickText, 128, ImGuiInputTextFlags.EnterReturnsTrue);
+        io.ConfigInputTextEnterKeepActive = keep;
+        var active = ImGuiNET.ImGui.IsItemActive();
+        ImGuiNET.ImGui.PopStyleColor(3);
+        dl.AddRect(bMin, bMax, Theme.ToU32(Theme.Hairline), 10f * D, ImDrawFlags.None, 1f / UiScale.K);
+        Gfx.FocusRing(dl, bMin, bMax, 10f * D, Widgets.Hover(ImGuiNET.ImGui.GetID("##pick-search"), active));
+        if (before != _pickText) { _pickSel = 0; _pickScroll = true; }
+
+        // ↑ ↓ move the pick, Enter takes it, Escape closes the tab.
+        if (active || ImGuiNET.ImGui.IsWindowFocused(ImGuiFocusedFlags.ChildWindows))
+        {
+            if (ImGuiNET.ImGui.IsKeyPressed(ImGuiKey.DownArrow)) { _pickSel++; _pickScroll = true; }
+            if (ImGuiNET.ImGui.IsKeyPressed(ImGuiKey.UpArrow))   { _pickSel--; _pickScroll = true; }
+            if (ImGuiNET.ImGui.IsKeyPressed(ImGuiKey.Escape, false)) ClosePicker();
+        }
+        _pickSel = hits.Count == 0 ? 0 : Math.Clamp(_pickSel, 0, hits.Count - 1);
+        string? pick = enter && hits.Count > 0 ? hits[_pickSel].Name : null;
+
+        ImGuiNET.ImGui.SetCursorScreenPos(pos);
+        ImGuiNET.ImGui.Dummy(new Vector2(w, h));
+        ImGuiNET.ImGui.Dummy(new Vector2(0f, 6f * D));
+
+        // The rows: a dot for the kind, the name with the typed part tinted, the namespace in
+        // grey, the usual direction at the end.
+        ImGuiNET.ImGui.BeginChild("##pick-list", new Vector2(-1f, -1f), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollWithMouse);
         SmoothScroll.Update();
-        foreach (var (kind, caption) in new[] { (NetTypes.Kind.Event, "events"), (NetTypes.Kind.Message, "messages"), (NetTypes.Kind.Bui, "BUI messages") })
+        var rowH   = 36f;
+        var rowW   = ImGuiNET.ImGui.GetContentRegionAvail().X;
+        var rdl    = ImGuiNET.ImGui.GetWindowDrawList();
+        var mouse  = io.MousePos;
+        var canHover = ImGuiNET.ImGui.IsWindowHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        if (hits.Count == 0 && all.Count > 0) Text("no type matches", Theme.P.Muted);
+        for (var i = 0; i < hits.Count; i++)
         {
-            var group = hits.Where(t => t.Kind == kind).ToList();
-            if (group.Count == 0) continue;
-            PanelCaption($"{caption}  {group.Count}");
-            foreach (var t in group)
+            if (q.Length == 0 && (i == 0 && recentN > 0 || i == recentN)) PanelCaption(i == 0 && recentN > 0 ? "recent" : "all");
+            var rpos = ImGuiNET.ImGui.GetCursorScreenPos();
+            if (_pickScroll && i == _pickSel) { ImGuiNET.ImGui.SetScrollHereY(0.5f); _pickScroll = false; }
+            if (!ImGuiNET.ImGui.IsRectVisible(new Vector2(1f, rowH))) { ImGuiNET.ImGui.Dummy(new Vector2(1f, rowH)); continue; }
+            var (name, kind) = hits[i];
+            var over = canHover && mouse.X >= rpos.X && mouse.X < rpos.X + rowW && mouse.Y >= rpos.Y && mouse.Y < rpos.Y + rowH;
+            if (over && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Left)) pick = name;
+            var rMin = rpos; var rMax = rpos + new Vector2(rowW, rowH);
+            if (i == _pickSel)  Gfx.GradientRect(rdl, rMin, rMax, Theme.Sel, Theme.SelR, 7f);
+            else if (over)      rdl.AddRectFilled(rMin, rMax, Theme.ToU32(Theme.P.Raised), 7f);
+
+            var ty = rpos.Y + (rowH - lineH) * 0.5f;
+            var kx = rpos.X + 12f * D;
+            rdl.AddCircleFilled(new Vector2(kx + 4f, rpos.Y + rowH * 0.5f), 4f, Theme.ToU32(KindColor(kind)));
+            var tx = kx + 20f * D;
+            var fg = Theme.ToU32(i == _pickSel ? Theme.P.Fg : Theme.P.Sub);
+            var hit = q.Length > 0 ? name.IndexOf(q, StringComparison.OrdinalIgnoreCase) : -1;
+            if (hit < 0) { rdl.AddText(new Vector2(tx, ty), fg, name); tx += ImGuiNET.ImGui.CalcTextSize(name).X; }
+            else
             {
-                var dir = NetActive.DirectionOf(t.Name);
-                ImGuiNET.ImGui.PushID(t.Name);
-                if (ImGuiNET.ImGui.Selectable("##t", false, ImGuiSelectableFlags.None, new Vector2(0f, ImGuiNET.ImGui.GetTextLineHeightWithSpacing())))
-                    pick = t.Name;
-                var min = ImGuiNET.ImGui.GetItemRectMin();
-                var max = ImGuiNET.ImGui.GetItemRectMax();
-                var dl  = ImGuiNET.ImGui.GetWindowDrawList();
-                dl.AddText(min + new Vector2(16f * D, 2f * D), Theme.ToU32(Theme.P.Fg), t.Name);
-                var arrow = dir is null ? "↑?" : dir == NetDir.In ? "↓" : "↑";
-                dl.AddText(new Vector2(max.X - 16f * D - ImGuiNET.ImGui.CalcTextSize(arrow).X, min.Y + 2f * D),
-                    Theme.ToU32(dir == NetDir.In ? Theme.P.Accent : dir is null ? Theme.P.Muted : Theme.P.Accent2), arrow);
-                ImGuiNET.ImGui.PopID();
+                var a = name[..hit]; var b = name.Substring(hit, q.Length); var c = name[(hit + q.Length)..];
+                rdl.AddText(new Vector2(tx, ty), fg, a); tx += ImGuiNET.ImGui.CalcTextSize(a).X;
+                rdl.AddText(new Vector2(tx, ty), Theme.ToU32(Theme.P.Accent2), b); tx += ImGuiNET.ImGui.CalcTextSize(b).X;
+                rdl.AddText(new Vector2(tx, ty), fg, c); tx += ImGuiNET.ImGui.CalcTextSize(c).X;
             }
+            if (NetTypes.Resolve(name)?.Namespace is { Length: > 0 } ns)
+            {
+                rdl.PushClipRect(new Vector2(tx, rpos.Y), new Vector2(rMax.X - 50f * D, rMax.Y), true);
+                rdl.AddText(font, small, new Vector2(tx + 14f * D, rpos.Y + (rowH - small) * 0.5f), Theme.ToU32(Theme.WithAlpha(Theme.P.Muted, 0.8f)), ns);
+                rdl.PopClipRect();
+            }
+            var dir   = NetActive.DirectionOf(name);
+            var arrow = dir is null ? "↑?" : dir == NetDir.In ? "↓" : "↑";
+            rdl.AddText(new Vector2(rMax.X - 14f * D - ImGuiNET.ImGui.CalcTextSize(arrow).X, ty),
+                Theme.ToU32(dir == NetDir.In ? Theme.P.Accent : dir is null ? Theme.P.Muted : Theme.P.Accent2), arrow);
+            ImGuiNET.ImGui.Dummy(new Vector2(rowW, rowH));
         }
-        if (hits.Count == 0) PanelCaption("no type matches");
         ImGuiNET.ImGui.EndChild();
-        if (pick is not null)
-        {
-            if (PacketDraft.ForType(pick) is { } d) ShowDraft(d);
-            else ImGuiRenderer.ShowToast("network", $"{pick}: type not found", 2f);
-            ImGuiNET.ImGui.CloseCurrentPopup();
-        }
-        ImGuiNET.ImGui.EndPopup();
+        ImGuiNET.ImGui.EndChild();
+
+        if (pick is not null) PickType(pick);
     }
+
+    private static Vector4 KindColor(NetTypes.Kind k) => k switch
+    {
+        NetTypes.Kind.Event => Theme.P.Accent2,
+        NetTypes.Kind.Bui   => Theme.P.Link,
+        _                   => Theme.P.Accent,
+    };
 
     // ── saving ───────────────────────────────────────────────────────────────────────────────
 
@@ -408,8 +534,9 @@ internal static partial class NetView
         var name = d.TypeName;
         var n = 2;
         while (NetActive.Saved.Any(s => s.Name == name)) name = $"{d.TypeName} {n++}";
-        NetActive.Saved.Add(SavedPacket.FromDraft(d, name));
+        var s = SavedPacket.FromDraft(d, name);
+        NetActive.Saved.Add(s);
         NetFeature.StoreSaved();
-        ImGuiRenderer.ShowToast("network", $"saved as “{name}”", 2f);
+        ImGuiRenderer.ShowToast("network", s.NoSnapshot ? $"saved as “{name}” (fields the editor doesn't show won't be kept: too big)" : $"saved as “{name}”", s.NoSnapshot ? 3.5f : 2f);
     }
 }

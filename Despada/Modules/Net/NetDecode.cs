@@ -25,6 +25,16 @@ internal sealed class FieldNode(string name, object? value, int depth)
     public bool    CanExpand { get; set; }
     public bool    Expanded  { get; set; }
     public List<FieldNode>? Children { get; set; }
+    /// <summary>How many pages of items are shown (int.MaxValue: all).</summary>
+    public int Page { get; set; } = 1;
+    /// <summary>A "… N more" row: the node whose next page it opens.</summary>
+    public FieldNode? PageOf { get; set; }
+
+    public void ShowMore(bool all)
+    {
+        Page = all ? int.MaxValue : Page + 1;
+        NetDecode.Extend(this);
+    }
 }
 
 /// <summary>
@@ -34,8 +44,8 @@ internal sealed class FieldNode(string name, object? value, int depth)
 /// </summary>
 internal static class NetDecode
 {
-    private const int MaxDepth = 10;
-    private const int PageSize = 100;
+    private const int MaxDepth = 64;   // children are built only on demand: the limit guards a self-referencing object, nothing else
+    internal const int PageSize = 100;
 
     // Engine plumbing that only leads away from the message itself.
     private static readonly HashSet<string> Skip =
@@ -227,6 +237,64 @@ internal static class NetDecode
         return node;
     }
 
+    /// <summary>The next page of a sequence's items appended to the children already shown (they keep their state).</summary>
+    internal static void Extend(FieldNode node)
+    {
+        if (node.Children is not { } list || node.Value is null || !IsSequence(node.Value)) return;
+        if (list.Count > 0 && list[^1].PageOf is not null) list.RemoveAt(list.Count - 1);
+        var limit = node.Page == int.MaxValue ? int.MaxValue : PageSize * node.Page;
+        try
+        {
+            var i = 0;
+            foreach (var item in (IEnumerable)node.Value)
+            {
+                if (i == limit) { list.Add(MoreRow(node, limit)); break; }
+                if (i >= list.Count) list.Add(Child($"[{i}]", item, node.Depth + 1, type: ItemType(node.Value.GetType())));
+                i++;
+            }
+        }
+        catch (Exception ex)
+        {
+            list.Add(ErrorRow(ex.Message, node.Depth + 1));
+        }
+    }
+
+    // "… N more": a link in the table, plain in the tree (which can't page).
+    private static FieldNode MoreRow(FieldNode of, int shown)
+    {
+        var left = $"… {Count(of.Value) - shown:N0} more";
+        return new FieldNode("", null, of.Depth + 1) { Text = [new Span(left, Tone.Muted)], ValueText = [new Span(left, Tone.Accent)], PageOf = of };
+    }
+
+    private static FieldNode ErrorRow(string message, int depth)
+    {
+        var span = new Span("⚠ " + OneLine(message), Tone.Red);
+        return new FieldNode("⚠", null, depth) { Text = [span], ValueText = [span] };
+    }
+
+    /// <summary>Every item of a sequence as throwaway nodes, unpaged, not kept on the node (for the finder's index).</summary>
+    internal static IEnumerable<FieldNode> Items(FieldNode node)
+    {
+        if (node.Value is not { } v || !IsSequence(v)) yield break;
+        if (node.Depth >= MaxDepth) yield break;
+        IEnumerator? e = null;
+        string? error = null;
+        try { e = ((IEnumerable)v).GetEnumerator(); }
+        catch (Exception ex) { error = ex.Message; }
+        var type = ItemType(v.GetType());
+        var i = 0;
+        while (error is null)
+        {
+            object? item = null;
+            var more = false;
+            try { more = e!.MoveNext(); if (more) item = e.Current; }
+            catch (Exception ex) { error = ex.Message; }
+            if (error is not null || !more) break;
+            yield return Child($"[{i++}]", item, node.Depth + 1, type: type);
+        }
+        if (error is not null) yield return ErrorRow(error, node.Depth + 1);
+    }
+
     /// <summary>Children of an expandable node, read on first use.</summary>
     public static List<FieldNode> Children(FieldNode node)
     {
@@ -239,24 +307,27 @@ internal static class NetDecode
                 const int maxLines = PageSize * 5;
                 var lines = StringLines(text, maxLines + 1);
                 foreach (var line in lines.Take(maxLines))
-                    list.Add(new FieldNode("", null, node.Depth + 1) { Text = [new Span(line.Length == 0 ? " " : line, Tone.Green)] });
+                {
+                    var span = new Span(line.Length == 0 ? " " : line, Tone.Green);
+                    list.Add(new FieldNode("", null, node.Depth + 1) { Text = [span], ValueText = [span] });
+                }
                 if (lines.Count > maxLines)
-                    list.Add(new FieldNode("", null, node.Depth + 1)
-                        { Text = [new Span($"… {LineCount(text) - maxLines} more lines", Tone.Muted)] });
+                {
+                    var more = new Span($"… {LineCount(text) - maxLines} more lines", Tone.Muted);
+                    list.Add(new FieldNode("", null, node.Depth + 1) { Text = [more], ValueText = [more] });
+                }
             }
-            else if (node.Value is not null && node.Depth < MaxDepth)
+            else if (node.Value is not null && node.Depth >= MaxDepth)
+                list.Add(ErrorRow("too deep to unfold", node.Depth + 1));
+            else if (node.Value is not null)
             {
                 if (IsSequence(node.Value))
                 {
                     var i = 0;
+                    var limit = node.Page == int.MaxValue ? int.MaxValue : PageSize * node.Page;
                     foreach (var item in (IEnumerable)node.Value)
                     {
-                        if (i == PageSize)
-                        {
-                            list.Add(new FieldNode("…", null, node.Depth + 1)
-                                { Text = [new Span($"… {Count(node.Value) - PageSize} more", Tone.Muted)] });
-                            break;
-                        }
+                        if (i == limit) { list.Add(MoreRow(node, limit)); break; }
                         list.Add(Child($"[{i}]", item, node.Depth + 1, type: ItemType(node.Value.GetType())));
                         i++;
                     }
@@ -270,7 +341,7 @@ internal static class NetDecode
         }
         catch (Exception ex)
         {
-            list.Add(new FieldNode("⚠", null, node.Depth + 1) { Text = [new Span($"⚠ {ex.Message}", Tone.Red)] });
+            list.Add(ErrorRow(ex.Message, node.Depth + 1));
         }
         node.Children = list;
         return list;
@@ -279,12 +350,14 @@ internal static class NetDecode
     private static FieldNode Child(string name, object? value, int depth, string? error = null, Type? type = null)
     {
         var n = new FieldNode(name, value, depth) { TypeName = TypeLabel(type ?? value?.GetType()) };
-        if (error is not null)
+        if (error is null)
         {
-            n.ValueText = [new Span("⚠ " + OneLine(error), Tone.Red)];
-            n.Text = [new Span(PadName(name), Tone.Muted), .. n.ValueText];
+            try { Describe(n); return n; }
+            catch (Exception ex) { error = ex.Message; }
         }
-        else Describe(n);
+        n.ValueText = [new Span("⚠ " + OneLine(error), Tone.Red)];
+        n.Text = [new Span(PadName(name), Tone.Muted), .. n.ValueText];
+        n.CanExpand = false;
         return n;
     }
 
@@ -315,10 +388,66 @@ internal static class NetDecode
     {
         var name = n.Depth == 0 ? [] : new[] { new Span(PadName(n.Name), Tone.Muted) };
         var (value, expand) = Format(n.Value);
-        n.ValueText = value;
+        Span[]? table = null;
+        if (n.Value is not null && (expand || IsSequence(n.Value)))
+        {
+            try { table = TableValue(n.Value); }
+            catch { /* the type name is shown instead */ }
+        }
+        n.ValueText = table ?? value;
         n.Text = [.. name, .. value];
         n.CanExpand = expand;
     }
+
+    /// <summary>Every field of an object as a row (name, value, type) for the hover tip of a shortened summary.</summary>
+    internal static List<(string Name, Span[] Value, string? Type)> SummaryRows(object v)
+    {
+        var rows = new List<(string, Span[], string?)>();
+        foreach (var f in Fields(v.GetType()))
+        {
+            var fv = SafeGet(f, v, out var err);
+            Span[] value;
+            if (err is not null) value = [new Span("⚠ " + OneLine(err), Tone.Red)];
+            else
+            {
+                var (text, canExpand) = Format(fv);
+                value = (canExpand && fv is not null ? TableValue(fv) : null) ?? text;
+            }
+            rows.Add((DisplayName(f), value, TypeLabel(f.FieldType)));
+        }
+        return rows;
+    }
+
+    // The table's value cell for an expandable node: what is inside rather than the type (which
+    // has its own column) — a pair's key, a collection's count, an object's first fields.
+    private static Span[]? TableValue(object v)
+    {
+        var t = v.GetType();
+        if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(KeyValuePair<,>))
+            return Format(Read(v, "key")).Text;
+        if (IsSequence(v))
+            return [new Span($"{Count(v):N0} {(IsDictionary(t) ? "entries" : "items")}", Tone.Sub)];
+        if (v is IEnumerable) return null;
+
+        var parts = new List<string>();
+        var fields = Fields(t);
+        foreach (var f in fields)
+        {
+            if (parts.Count == 2) break;
+            var fv = SafeGet(f, v, out var err);
+            if (err is not null || fv is null) continue;
+            var (text, canExpand) = Format(fv);
+            if (canExpand) continue;
+            parts.Add($"{DisplayName(f)} = {OneLine(string.Concat(text.Select(s => s.Text)))}");
+        }
+        if (parts.Count == 0) return fields.Length > 0 ? [new Span("{…}", Tone.Sub)] : null;
+        var tail = fields.Length > parts.Count ? ", …" : "";
+        return [new Span("{" + string.Join(", ", parts) + tail + "}", Tone.Sub)];
+    }
+
+    internal static bool IsDictionary(Type t)
+        => typeof(IDictionary).IsAssignableFrom(t)
+           || t.GetInterfaces().Any(i => i.IsGenericType && (i.GetGenericTypeDefinition() == typeof(IReadOnlyDictionary<,>) || i.GetGenericTypeDefinition() == typeof(IDictionary<,>)));
 
     // Rows are one line high: a string with line breaks, or too long for a row, shows its start and
     // unfolds into its lines (long lines in pieces), one per row.
@@ -397,6 +526,8 @@ internal static class NetDecode
         }
         if (t.Name.StartsWith("ProtoId") || t.Name == "EntProtoId")
             return ([new Span($"\"{Read(v, "Id")}\"", Tone.Green), new Span("  proto", Tone.Muted)], false);
+        if (v is IFormattable fmt && t.IsValueType && !IsSequence(v))
+            return ([new Span(fmt.ToString(null, CultureInfo.InvariantCulture) ?? "")], false);
 
         if (IsSequence(v))
         {
@@ -466,6 +597,8 @@ internal static class NetDecode
 
     // Only bounded collections are listed: arrays and anything with a Count.
     private static bool IsSequence(object v) => v is Array or ICollection || ReadOnlyCount(v) is not null;
+    internal static bool IsSequenceValue(object v) => IsSequence(v);
+    internal static int CountOf(object v) => Count(v);
 
     private static int Count(object? v) => v switch
     {
