@@ -14,6 +14,8 @@ internal enum PacketMark
     Blocked,
     /// <summary>Waiting in <see cref="NetActive.Frozen"/>.</summary>
     Frozen,
+    /// <summary>Still frozen, its send queued: it leaves the queue once that send has gone.</summary>
+    Releasing,
     /// <summary>A rule made copies of it (<see cref="Packet.MarkCount"/> of them).</summary>
     Duplicated,
     /// <summary>One of those copies.</summary>

@@ -101,7 +101,11 @@ internal static class DraftBuilder
             if (f.Kind == DraftKind.Node)
             {
                 var current = f.Field.GetValue(target);
-                var child   = current is not null ? (f.Field.FieldType.IsValueType ? current : Clone(current)) : Create(Nullable.GetUnderlyingType(f.Field.FieldType) ?? f.Field.FieldType);
+                // A captured null stays null unless something under it was edited: a nullable
+                // struct or an optional object must not turn into a default instance just by being
+                // sent. A fresh object (setAll) takes every node: there is nothing captured to keep.
+                if (current is null && !setAll && !f.AnyChanged()) continue;
+                var child = current is not null ? Copy(current) : Create(Nullable.GetUnderlyingType(f.Field.FieldType) ?? f.Field.FieldType);
                 Apply(child, f.Children, setAll || current is null);
                 f.Field.SetValue(target, child);   // a struct comes back boxed: written back
                 continue;
@@ -139,7 +143,7 @@ internal static class DraftBuilder
             object? value;
             if (item.Kind == DraftKind.Node)
             {
-                var child = item.Source is { } src ? (et.IsValueType ? src : Clone(src)) : Create(Nullable.GetUnderlyingType(et) ?? et);
+                var child = item.Source is { } src ? Copy(src) : Create(Nullable.GetUnderlyingType(et) ?? et);
                 Apply(child, item.Children, setAll: item.Source is null);
                 value = child;
             }
@@ -231,4 +235,8 @@ internal static class DraftBuilder
     }
 
     private static object Clone(object o) => CloneMethod.Invoke(o, null)!;
+
+    // A source is never written to: a class is cloned, a boxed struct re-boxed (writing through a
+    // FieldInfo into the box the draft keeps would make the edit stick past a revert or a cancel).
+    private static object Copy(object o) => o.GetType().IsValueType ? System.Runtime.CompilerServices.RuntimeHelpers.GetObjectValue(o) : Clone(o);
 }

@@ -213,3 +213,28 @@ public class ByteStreamTests
         Assert.Equal([[0xa2, 0x1d], [0x51, 0x07, 0, 0]], ByteStream.Patterns(new NetEntity(1873)));
     }
 }
+
+public class ByteStreamUnitTests
+{
+    [Fact]
+    public void Characters_outside_the_BMP_map_as_two_units()
+    {
+        const string text = "ok 🙂 да";                                          // 7 units: the emoji is a pair
+        var utf8  = Encoding.UTF8.GetBytes(text);
+        var bytes = new byte[] { 0x01, (byte)(utf8.Length + 1), (byte)text.Length }.Concat(utf8).Concat(new byte[] { 7, 1, 2, 3 }).ToArray();
+        var s   = ByteStream.Build(bytes, null);
+        var str = Assert.Single(s.Tokens, t => t.Kind == ByteKind.Str);
+        Assert.Equal(text, str.PlainText);
+        Assert.Equal(str.PlainText.Length, str.Chars);                          // the rule: units, as the string is
+        Assert.Equal(str.ByteAt(3), str.ByteAt(4));                             // both units of the pair start at its first byte
+        Assert.Equal(3 + 3 + 4 + 1, str.ByteAt(6));                             // "д" after "ok ", the pair and a space
+        Assert.Equal(3, str.CharAt(str.ByteAt(3)));                              // any byte of the pair: its first unit
+        Assert.Equal(3, str.CharAt(str.ByteAt(3) + 2));
+        Assert.Equal((3, 5), str.CharRange(str.ByteAt(3), str.ByteAt(3) + 4));   // the pair whole
+        Assert.Equal(5, str.CharEndAt(str.ByteAt(3)));
+        for (var cols = 8; cols <= 12; cols++)                                   // never split inside the pair, whatever the width
+            foreach (var line in s.Wrap(cols))
+                foreach (var (tok, from, to, _) in line.Parts)
+                    if (tok.Kind == ByteKind.Str && to < tok.PlainText.Length) Assert.False(char.IsHighSurrogate(tok.PlainText[to - 1]), $"split at {to} with {cols} cols");
+    }
+}

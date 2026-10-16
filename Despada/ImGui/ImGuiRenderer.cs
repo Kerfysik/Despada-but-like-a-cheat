@@ -72,10 +72,15 @@ public static class ImGuiRenderer
                 Opened++;
             }
 
-            // Losing focus makes ImGui release every held key/button, so nothing stays
-            // "pressed" while the overlay is hidden and key-ups go to the game.
-            if (_initialized)
-                ImGuiNET.ImGui.GetIO().AddFocusEvent(OverlayVisible);
+            // Hidden: every key and button ImGui holds is released now, directly (a queued focus
+            // event would only be applied at the next NewFrame, together with the "focus back"
+            // event, and the pair cancels out); the key-ups themselves go to the game meanwhile.
+            if (_initialized && !OverlayVisible)
+            {
+                var io = ImGuiNET.ImGui.GetIO();
+                io.ClearInputKeys();
+                io.ClearInputMouse();
+            }
 
             try
             {

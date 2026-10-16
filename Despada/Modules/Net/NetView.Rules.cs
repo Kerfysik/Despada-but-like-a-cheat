@@ -65,10 +65,10 @@ internal static partial class NetView
         float filterW = cw * 28f, actionW = cw * 12f;
         foreach (var r in rules)
         {
-            filterW = MathF.Max(filterW, ImGuiNET.ImGui.CalcTextSize(FilterText(r)).X);
+            filterW = MathF.Max(filterW, ImGuiNET.ImGui.CalcTextSize(FilterText(r) + Notes(r)).X);   // the column holds everything drawn in it
             actionW = MathF.Max(actionW, 18f + ImGuiNET.ImGui.CalcTextSize(ActionText(r)).X);
         }
-        filterW = MathF.Min(filterW, cw * 44f);
+        filterW = MathF.Min(filterW, cw * 60f);
         actionW = MathF.Min(actionW, cw * 30f);
         var hitsW = cw * 4f;
         const float gap = 14f;
@@ -152,6 +152,12 @@ internal static partial class NetView
 
     private static string FilterText(NetRule r)
         => r.Query.Tokens.Count == 0 ? "(empty: matches nothing) " : string.Concat(r.Query.Tokens.Select(t => TokenHead(t) + t.Value + " "));
+
+    // What the row draws after the tokens, in the same column.
+    private static string Notes(NetRule r)
+        => (r.Query.Tokens.Count > 0 && r.Invalid ? "(unknown token) " : "")
+         + (r.Error is { } err ? $"⚠ {err} " : "")
+         + (r.Unsafe ? NetRule.UnsafeWord : r.WouldSkipState ? "(state passes: !unsafe)" : "");
 
     private static string ActionText(NetRule r)
         => r.Detail.Length > 0 ? $"{r.ActionLabel}  {r.Detail}" : r.ActionLabel;

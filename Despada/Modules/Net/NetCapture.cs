@@ -96,10 +96,13 @@ internal static class NetCapture
             lock (_lock)
             {
                 if (value == _ring.Length) return;
-                var old = Snapshot();
+                var old  = Snapshot();
+                var kept = old.Skip(Math.Max(0, old.Count - value)).ToList();
                 _ring = new Packet?[value];
-                foreach (var p in old.Skip(Math.Max(0, old.Count - value)))
-                    _ring[p.Seq % value] = p;
+                foreach (var p in kept) _ring[p.Seq % value] = p;
+                // The window is what the ring holds, not its length: a bigger ring must not claim
+                // packets that were never kept.
+                _first = kept.Count > 0 ? Math.Max(_first, kept[0].Seq) : _nextSeq;
             }
         }
     }
@@ -271,7 +274,8 @@ internal static class NetCapture
     {
         try
         {
-            if (_skipNext || __args.Length < 2 || __args[1] is not { } message) return;
+            // Our own sends (a draft, a resend, a copy) are never run through the rules.
+            if (_skipNext || _nextMark != PacketMark.None || __args.Length < 2 || __args[1] is not { } message) return;
             NetActive.ModifyBeforeSend(message);
         }
         catch (Exception ex)
@@ -352,6 +356,14 @@ internal static class NetCapture
         return tick is null ? 0 : (uint)(Engine.GameTickValue.Get(tick) ?? 0u);
     }
 
+    // A packet that left the ring: out of its type's list (the oldest of its type, normally the head).
+    private static void Forget(Packet p)
+    {
+        if (!_types.TryGetValue(p.Inner ?? p.Type.Name, out var t)) return;
+        if (t.Kept.First is { } head && ReferenceEquals(head.Value, p)) t.Kept.RemoveFirst();
+        else t.Kept.Remove(p);
+    }
+
     private static void CountType(Packet p)
     {
         var key = p.Inner ?? p.Type.Name;
@@ -391,16 +403,16 @@ internal static class NetCapture
 
     private static void Drop(Packet p, bool force = false)
     {
-        p.Index = null;   // first: an index being written right now must not outlive the message
-        if (p.Message is null) return;
+        if (p.Message is null) { p.Index = null; return; }   // an index written after the message went must not outlive it
         if (p.Pinned && !force)
         {
-            p.Untracked = true;   // left the queues while pinned: Unpin drops it
+            p.Untracked = true;   // left the queues while pinned: Unpin drops it (the index stays with the message)
             return;
         }
         NetDecode.Summary(p);
         p.Message = null;
         p.Bytes   = null;
+        p.Index   = null;
     }
 
     /// <summary>Keeps the packet's message and bytes while it is open in the inspector.</summary>
@@ -475,7 +487,9 @@ internal static class NetCapture
         lock (_lock)
         {
             p.Seq = _nextSeq++;
-            _ring[p.Seq % _ring.Length] = p;
+            var slot = p.Seq % _ring.Length;
+            if (_ring[slot] is { } gone) Forget(gone);   // pushed out of the ring: its type's list lets it go too
+            _ring[slot] = p;
 
             if (p.Dir == NetDir.In) { TotalIn++;  BytesIn  += p.Size; }
             else                    { TotalOut++; BytesOut += p.Size; }

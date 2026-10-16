@@ -59,15 +59,35 @@ internal static class NetActive
     /// </summary>
     public static bool IsMuted(Packet p)
     {
-        for (var i = 0; i < Rules.Count; i++)
+        try
         {
-            var r = Rules[i];
-            if (r.Action != RuleAction.Mute || !r.Matches(p)) continue;
-            Interlocked.Increment(ref r.Hits);
-            Interlocked.Increment(ref MutedCount);
-            return true;
+            for (var i = 0; i < Rules.Count; i++)
+            {
+                var r = Rules[i];
+                if (r.Action != RuleAction.Mute || !Hit(r, p)) continue;
+                Interlocked.Increment(ref r.Hits);
+                Interlocked.Increment(ref MutedCount);
+                return true;
+            }
         }
+        catch (ArgumentOutOfRangeException) { }   // the list shrank under a send from another thread: not muted
         return false;
+    }
+
+    // A rule's filter on a packet; a rule that throws goes off with its error, the packet passes.
+    // Rules never reach the hooks' failure count: one bad rule must not shut the whole log off.
+    private static bool Hit(NetRule r, Packet p)
+    {
+        try { return r.Matches(p); }
+        catch (Exception ex) { Fault(r, ex); return false; }
+    }
+
+    private static void Fault(NetRule r, Exception ex)
+    {
+        r.Enabled = false;
+        r.Error = ex.Message;
+        Log.Warn("net", $"rule '{r.Filter}' off: {ex.GetType().Name}: {ex.Message}");
+        ImGuiRenderer.ShowToast("network", $"rule off: {r.Filter}", 3f);
     }
 
     /// <summary>
@@ -83,7 +103,7 @@ internal static class NetActive
         for (var i = 0; i < Rules.Count; i++)
         {
             var r = Rules[i];
-            if (r.Action == RuleAction.Mute && r.Matches(p)) return true;
+            if (r.Action == RuleAction.Mute && Hit(r, p)) return true;
         }
         return false;
     }
@@ -102,7 +122,7 @@ internal static class NetActive
         if (!Armed || p.Ours) return true;
         NetRule? hit = null;
         foreach (var r in Rules.ToArray())
-            if (r.Action != RuleAction.Mute && r.Matches(p)) { hit = r; break; }
+            if (r.Action != RuleAction.Mute && Hit(r, p)) { hit = r; break; }
         if (hit is null) return true;
 
         Interlocked.Increment(ref hit.Hits);
@@ -130,7 +150,7 @@ internal static class NetActive
                     var size = p.Size;
                     var every = hit.EveryMs;
                     // The first copy a step after the original, not alongside it.
-                    Schedule(hit.Count, every, () => Put(msg, dir, PacketMark.Copy, size: size), delayMs: Math.Max(every, 1));
+                    Schedule(hit.Count, every, () => Put(msg, dir, PacketMark.Copy, size: size), delayMs: Math.Max(every, 1), owner: hit);
                 }
                 return true;
             }
@@ -175,7 +195,7 @@ internal static class NetActive
         }
         NetRule? hit = null;
         foreach (var r in Rules.ToArray())
-            if (r.Action != RuleAction.Mute && r.Matches(p)) { hit = r; break; }
+            if (r.Action != RuleAction.Mute && Hit(r, p)) { hit = r; break; }
         if (hit is null || hit.Action != RuleAction.Modify) return;
         _preModified = ApplyModify(hit, message);
     }
@@ -183,19 +203,23 @@ internal static class NetActive
     // "Field=value" pairs set on the message (for MsgEntity: on the event inside); true when any took.
     private static bool ApplyModify(NetRule rule, object target)
     {
-        if (target.GetType().Name == "MsgEntity" && Engine.MsgEntitySystem.Ok && Engine.MsgEntitySystem.Invoke(target) is { } ev)
-            target = ev;
-        var changed = false;
-        foreach (var (path, value) in rule.ModifyPairs())
+        try
         {
-            if (DraftBuilder.TrySet(target, path, value, out var error)) changed = true;
-            else if (rule.Error != error)
+            if (target.GetType().Name == "MsgEntity" && Engine.MsgEntitySystem.Ok && Engine.MsgEntitySystem.Invoke(target) is { } ev)
+                target = ev;
+            var changed = false;
+            foreach (var (path, value) in rule.ModifyPairs())
             {
-                rule.Error = error;
-                Log.Warn("net", $"modify rule: {error}");
+                if (DraftBuilder.TrySet(target, path, value, out var error)) changed = true;
+                else if (rule.Error != error)
+                {
+                    rule.Error = error;
+                    Log.Warn("net", $"modify rule: {error}");
+                }
             }
+            return changed;
         }
-        return changed;
+        catch (Exception ex) { Fault(rule, ex); return false; }
     }
 
     // Types as they were last seen going by (events only know their direction from traffic).
@@ -387,20 +411,35 @@ internal static class NetActive
             ImGuiRenderer.ShowToast("network", "arm to release packets", 2f);
             return;
         }
-        lock (Sync) Frozen.Remove(p);
         var msg = p.Message;
-        NetCapture.Unpin(p);
         if (msg is null)
         {
             // Lost to retention after all: it never went anywhere, so it counts as blocked.
+            lock (Sync) Frozen.Remove(p);
+            NetCapture.Unpin(p);
             p.Mark = PacketMark.Blocked;
             Interlocked.Increment(ref BlockedCount);
             ImGuiRenderer.ShowToast("network", $"#{p.Seq}: no longer kept, can't release", 2.5f);
             return;
         }
-        p.Mark = PacketMark.None;
+        if (p.Mark == PacketMark.Releasing) return;   // already in the queue
+        p.Mark = PacketMark.Releasing;
         var dir = p.Dir;
-        Schedule(1, 0, () => Put(msg, dir, PacketMark.None, skipCapture: true));   // through the rate limit, like every send
+        // Through the rate limit, like every send; frozen and pinned until it has really gone,
+        // so a disarm or a lost connection in between leaves it where it was, not vanished.
+        // Its own owner: a release is never cut by another owner's burst.
+        var accepted = Schedule(1, 0, () =>
+        {
+            // Dropped or let go of meanwhile: this send is void.
+            bool still;
+            lock (Sync) still = p.Mark == PacketMark.Releasing && Frozen.Contains(p);
+            if (!still) return;
+            if (!Put(msg, dir, PacketMark.None, skipCapture: true)) { p.Mark = PacketMark.Frozen; return; }
+            lock (Sync) Frozen.Remove(p);
+            NetCapture.Unpin(p);
+            p.Mark = PacketMark.None;
+        });
+        if (accepted == 0) p.Mark = PacketMark.Frozen;
     }
 
     /// <summary>
@@ -498,43 +537,101 @@ internal static class NetActive
 
     // ── repeating, with the rate limit ───────────────────────────────────────────────────────
 
-    private readonly record struct Job(long Due, Action Run);
-    private static readonly List<Job> _jobs = new();
+    // Every queued send belongs to an owner: the rule that made it, or the batch of one manual
+    // action. A rule's jobs go with the rule (deleted or off); no owner may hold more than half
+    // a minute of sends at the rate limit, the rest of a burst is dropped and counted; the whole
+    // queue goes when the connection does (a stale send must not reach the next server).
+    private readonly record struct Job(long Due, Action Run, object Owner);
+    private static List<Job> _jobs = new();
+    private static int MaxQueuedPerOwner => RateLimit * 30;
 
     /// <summary>Sends waiting in the scheduler.</summary>
     public static int PendingSends
     {
         get { lock (Sync) return _jobs.Count; }
     }
+    /// <summary>Sends a burst asked for that the queue would not hold.</summary>
+    public static int DroppedSends;
     private static long _windowStart;
     private static int  _sentInWindow;
 
-    /// <summary><paramref name="times"/> runs of <paramref name="run"/>, <paramref name="everyMs"/> apart, on the game thread.</summary>
-    public static void Schedule(int times, int everyMs, Action run, int delayMs = 0)
+    /// <summary>
+    /// <paramref name="times"/> runs of <paramref name="run"/>, <paramref name="everyMs"/> apart, on the
+    /// game thread; how many the queue took. The queue stays in due order (each job goes in at its
+    /// place), so Pump's one pass is the earliest first.
+    /// </summary>
+    public static int Schedule(int times, int everyMs, Action run, int delayMs = 0, object? owner = null)
     {
         times = Math.Clamp(times, 1, 1000);
+        owner ??= new object();
         var now  = Stopwatch.GetTimestamp();
         var tick = Stopwatch.Frequency / 1000.0;
+        var taken = 0;
         lock (Sync)
+        {
+            var held = 0;
+            foreach (var j in _jobs) if (ReferenceEquals(j.Owner, owner)) held++;
+            var at = _jobs.Count;   // this call's jobs are ascending: the search starts where the last one went
             for (var i = 0; i < times; i++)
-                _jobs.Add(new Job(now + (long)((delayMs + i * everyMs) * tick), run));
+            {
+                if (held++ >= MaxQueuedPerOwner) break;
+                var job = new Job(now + (long)((delayMs + i * everyMs) * tick), run, owner);
+                while (at > 0 && _jobs[at - 1].Due > job.Due) at--;
+                while (at < _jobs.Count && _jobs[at].Due <= job.Due) at++;
+                _jobs.Insert(at++, job);
+                taken++;
+            }
+        }
+        if (taken < times)
+        {
+            DroppedSends += times - taken;
+            ImGuiRenderer.ShowToast("network", $"{times - taken} of {times} sends dropped: the queue holds half a minute at the rate limit", 3f);
+        }
+        return taken;
+    }
+
+    /// <summary>Forgets every queued send; a packet waiting to be released is frozen again.</summary>
+    public static void CancelPending()
+    {
+        lock (Sync)
+        {
+            _jobs.Clear();
+            foreach (var p in Frozen) if (p.Mark == PacketMark.Releasing) p.Mark = PacketMark.Frozen;
+        }
+    }
+
+    internal static bool AssumeConnected;   // tests: no engine to ask
+
+    private static bool Connected()
+    {
+        if (AssumeConnected) return true;
+        var net = Engine.ClientNet.Instance;
+        return net is not null && (!Engine.NetIsConnected.Ok || Engine.NetIsConnected.Invoke(net) is not false);
     }
 
     /// <summary>Runs the jobs that are due; at most <see cref="RateLimit"/> per second, the rest wait. Called every tick.</summary>
     public static void Pump()
     {
-        if (!Armed)
+        if (!Armed || !Connected())
         {
-            lock (Sync) _jobs.Clear();
+            CancelPending();
             return;
         }
         var now = Stopwatch.GetTimestamp();
         if (now - _windowStart > Stopwatch.Frequency) { _windowStart = now; _sentInWindow = 0; }
-        List<Job> due;
+        var due  = new List<Job>();
         lock (Sync)
         {
-            due = _jobs.Where(j => j.Due <= now).OrderBy(j => j.Due).Take(Math.Max(0, RateLimit - _sentInWindow)).ToList();
-            foreach (var j in due) _jobs.Remove(j);
+            if (_jobs.Count == 0) return;
+            var budget = Math.Max(0, RateLimit - _sentInWindow);
+            var keep   = new List<Job>(_jobs.Count);
+            foreach (var j in _jobs)   // in due order: Schedule keeps the list sorted
+            {
+                if (j.Owner is NetRule r && (!r.Enabled || !Rules.Contains(r))) continue;   // the rule is gone: so are its sends
+                if (j.Due <= now && due.Count < budget) due.Add(j);
+                else keep.Add(j);
+            }
+            _jobs = keep;
         }
         foreach (var j in due)
         {
@@ -572,7 +669,9 @@ internal static class NetActive
     {
         Armed = false;
         MutedCount = 0;
-        lock (Sync) _jobs.Clear();
+        CancelPending();
+        DroppedSends = 0;
+        AssumeConnected = false;
         DropAll();
     }
 

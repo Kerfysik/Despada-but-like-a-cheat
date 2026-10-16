@@ -134,6 +134,7 @@ internal static partial class NetView
 
     private static void SetIndex(Packet p, string text)
     {
+        if (p.Index is not null) return;   // the pump and a search can both get here: counted once
         p.Index = text;
         if (p.Message is null) { p.Index = null; return; }   // dropped meanwhile: nothing outlives the message
         _indexed.Enqueue((p, text.Length), p.Seq);
@@ -252,9 +253,12 @@ internal static partial class NetView
         // a name match before a value match, then the shallower path.
         private static IEnumerable<FinderItem?> InPacket(Packet p, FinderQuery q, bool scoped)
         {
-            if (p.Index is null)
-                foreach (var step in IndexSteps(p)) { if (step is { } text) SetIndex(p, text); else yield return null; }
-            if (p.Index is not { } index || !index.Contains(q.Text, StringComparison.OrdinalIgnoreCase)) yield break;
+            // The text searched is the one in hand: the cache may already have let it go (its
+            // budget evicts the oldest packets, and a newest-first search builds exactly those).
+            var index = p.Index;
+            if (index is null)
+                foreach (var step in IndexSteps(p)) { if (step is { } text) { SetIndex(p, text); index = text; } else yield return null; }
+            if (index is null || !index.Contains(q.Text, StringComparison.OrdinalIgnoreCase)) yield break;
             IndexLine? best = null;
             var bestScore = int.MaxValue;
             var count = 0;

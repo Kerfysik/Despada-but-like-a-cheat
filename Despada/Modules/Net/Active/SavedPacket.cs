@@ -67,7 +67,8 @@ internal sealed class SavedPacket
             else s.Source = ObjectSnapshot.Take(built);
         }
         catch (Exception ex) { Log.Warn("net", $"save {name}: kept as edits over the capture: {ex.Message}"); }
-        if (s.Source is { } src && (!src.Complete || s.Wrap is { Complete: false } || ObjectSnapshot.ToJson(src).Length > SnapshotCap))
+        if (s.Source is { } src && (!src.Complete || s.Wrap is { Complete: false }
+                                    || ObjectSnapshot.ToJson(src).Length + (s.Wrap is { } w ? ObjectSnapshot.ToJson(w).Length : 0) > SnapshotCap))
         {
             s.Source = s.Wrap = null;
             s.NoSnapshot = true;
@@ -79,7 +80,11 @@ internal sealed class SavedPacket
         return s;
     }
 
-    /// <summary>The plain record written to the config.</summary>
+    /// <summary>
+    /// The plain record written to the config. A snapshot goes as one JSON string: as a nested
+    /// object its depth (two levels per field, four per dictionary) would hit the config's limit
+    /// and take the whole file down with it. Older files hold the object itself; both are read.
+    /// </summary>
     public sealed class Dto
     {
         public string Name { get; set; } = "";
@@ -87,20 +92,39 @@ internal sealed class SavedPacket
         public string Dir { get; set; } = "out";
         public string Note { get; set; } = "";
         public DateTime? LastSent { get; set; }
-        public Dictionary<string, string> Values { get; set; } = new();
-        public ObjectSnapshot.Node? Source { get; set; }
-        public ObjectSnapshot.Node? Wrap { get; set; }
+        public Dictionary<string, string>? Values { get; set; } = new();
+        public System.Text.Json.JsonElement? Source { get; set; }
+        public System.Text.Json.JsonElement? Wrap { get; set; }
+        public bool NoSnapshot { get; set; }
     }
 
     public Dto ToDto() => new()
     {
         Name = Name, Type = TypeName, Dir = Dir == NetDir.In ? "in" : "out", Note = Note, LastSent = LastSent, Values = Values,
-        Source = Source, Wrap = Wrap,
+        Source = Pack(Source), Wrap = Pack(Wrap), NoSnapshot = NoSnapshot,
     };
 
     public static SavedPacket FromDto(Dto d) => new()
     {
-        Name = d.Name, TypeName = d.Type, Dir = d.Dir == "in" ? NetDir.In : NetDir.Out, Note = d.Note, LastSent = d.LastSent,
-        Values = d.Values, Source = d.Source, Wrap = d.Wrap,
+        Name = d.Name ?? "", TypeName = d.Type ?? "", Dir = d.Dir == "in" ? NetDir.In : NetDir.Out, Note = d.Note ?? "", LastSent = d.LastSent,
+        Values = d.Values ?? new(), Source = Unpack(d.Source), Wrap = Unpack(d.Wrap), NoSnapshot = d.NoSnapshot,
     };
+
+    private static System.Text.Json.JsonElement? Pack(ObjectSnapshot.Node? n)
+        => n is null ? null : System.Text.Json.JsonSerializer.SerializeToElement(ObjectSnapshot.ToJson(n));
+
+    private static ObjectSnapshot.Node? Unpack(System.Text.Json.JsonElement? e)
+    {
+        if (e is not { } el) return null;
+        try
+        {
+            return el.ValueKind switch
+            {
+                System.Text.Json.JsonValueKind.String => ObjectSnapshot.FromJson(el.GetString()),
+                System.Text.Json.JsonValueKind.Object => ObjectSnapshot.FromJson(el.GetRawText()),
+                _ => null,
+            };
+        }
+        catch (Exception ex) { Log.Warn("net", $"saved packet: snapshot not read: {ex.Message}"); return null; }
+    }
 }

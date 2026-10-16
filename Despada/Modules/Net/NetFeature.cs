@@ -60,36 +60,37 @@ internal sealed class NetFeature : Feature
     }
 
     // Saved packets and pinned rules live in the feature's settings; the arm switch does not.
-    private void LoadRules()
+    // Items that can't be read are kept as they are and written back untouched.
+    private static List<System.Text.Json.JsonElement> _unreadRules = new(), _unreadSaved = new();
+
+    private static void LoadRules()
     {
         NetActive.Rules.RemoveAll(r => r.Pinned);
-        foreach (var dto in Setting<List<NetRule.Dto>>("rules", []))
-            NetActive.Rules.Add(NetRule.FromDto(dto));
+        var (dtos, unread) = Features.GetSettingItems<NetRule.Dto>(NetCapture.Owner, "rules");
+        _unreadRules = unread;
+        foreach (var dto in dtos) NetActive.Rules.Add(NetRule.FromDto(dto));
     }
 
     internal static void StoreRules()
-    {
-        if (Features.Find(NetCapture.Owner) is NetFeature f)
-            f.SetSetting("rules", NetActive.Rules.Where(r => r.Pinned).Select(r => r.ToDto()).ToList());
-    }
+        => Features.SetSettingItems(NetCapture.Owner, "rules", NetActive.Rules.Where(r => r.Pinned).Select(r => r.ToDto()), _unreadRules);
 
-    private void LoadSaved()
+    private static void LoadSaved()
     {
         NetActive.Saved.Clear();
-        foreach (var dto in Setting<List<SavedPacket.Dto>>("saved", []))
-            NetActive.Saved.Add(SavedPacket.FromDto(dto));
+        var (dtos, unread) = Features.GetSettingItems<SavedPacket.Dto>(NetCapture.Owner, "saved");
+        _unreadSaved = unread;
+        foreach (var dto in dtos) NetActive.Saved.Add(SavedPacket.FromDto(dto));
     }
 
     internal static void StoreSaved()
     {
-        if (Features.Find(NetCapture.Owner) is not NetFeature f) return;
         var dtos = new List<SavedPacket.Dto>();
         foreach (var s in NetActive.Saved)
         {
             try { dtos.Add(s.ToDto()); }
             catch (Exception ex) { Log.Warn("net", $"saved {s.Name}: not written: {ex.Message}"); }
         }
-        f.SetSetting("saved", dtos);
+        Features.SetSettingItems(NetCapture.Owner, "saved", dtos, _unreadSaved);
     }
 
     private static void Tick()

@@ -126,8 +126,18 @@ public static class ImGuiInputHook
             if (owner == "input") ImGuiRenderer.Disable($"input hooks shut off: {reason}");
         };
 
-        foreach (var target in new[] { Engine.InputKeyDown, Engine.InputKeyUp, Engine.UiMouseMove,
-                                       Engine.UiMouseWheel, Engine.GameTextEntered })
+        // Keys down without keys up (or buttons without releases) would leave ImGui holding them
+        // for good: those three hooks are one set, all or none. Wheel and text only lose their kind.
+        var required = new[] { Engine.InputKeyDown, Engine.InputKeyUp, Engine.UiMouseMove };
+        var ok = true;
+        foreach (var target in required) ok &= Hooks.Prefix("input", target, nameof(Prefix), typeof(ImGuiInputHook));
+        if (!ok)
+        {
+            Hooks.RemoveAll("input");
+            ImGuiRenderer.Disable("input hooks incomplete");
+            return;
+        }
+        foreach (var target in new[] { Engine.UiMouseWheel, Engine.GameTextEntered })
             Hooks.Prefix("input", target, nameof(Prefix), typeof(ImGuiInputHook));
     }
 

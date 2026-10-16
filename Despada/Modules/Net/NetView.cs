@@ -197,12 +197,9 @@ internal static unsafe partial class NetView
         }
 
         // Unfolded packets that left the list would otherwise keep their message objects alive.
-        if (changed || drop > 0 || pruned)
-        {
-            var visible = new HashSet<long>(_matches);
-            foreach (var k in _open.Keys.Where(k => k < first || !visible.Contains(k)).ToList())
+        if (_open.Count > 0 && (changed || drop > 0 || pruned))
+            foreach (var k in _open.Keys.Where(k => k < first || _matches.BinarySearch(k) < 0).ToList())   // _matches is sorted
                 _open.Remove(k);
-        }
 
         if (_rowsDirty) Rebuild();
     }
@@ -472,7 +469,7 @@ internal static unsafe partial class NetView
     private static Vector4? MarkTint(PacketMark m) => m switch
     {
         PacketMark.Blocked    => Theme.WithAlpha(Theme.P.Red, 0.14f),
-        PacketMark.Frozen     => Theme.WithAlpha(Theme.P.Accent, 0.14f),
+        PacketMark.Frozen or PacketMark.Releasing => Theme.WithAlpha(Theme.P.Accent, 0.14f),
         PacketMark.Duplicated => Theme.WithAlpha(Theme.P.Accent2, 0.14f),
         PacketMark.Edited     => Theme.WithAlpha(Theme.P.Accent2, 0.14f),
         PacketMark.Custom     => Theme.WithAlpha(Theme.P.Yellow, 0.12f),
@@ -483,6 +480,7 @@ internal static unsafe partial class NetView
     {
         PacketMark.Blocked    => ("⊘ blocked", Theme.P.Red),
         PacketMark.Frozen     => ("frozen", Theme.P.Accent),
+        PacketMark.Releasing  => ("releasing", Theme.P.Accent),
         PacketMark.Duplicated => ($"×{Math.Max(count, 2)}", Theme.P.Accent2),
         PacketMark.Copy       => ("copy", Theme.P.Muted),
         PacketMark.Edited     => ("edited", Theme.P.Accent2),

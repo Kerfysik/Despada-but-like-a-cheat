@@ -33,7 +33,7 @@ internal sealed class ByteToken(ByteKind kind, int offset, int length)
 
     public string PlainText => string.Concat(Text.Select(s => s.Text));
 
-    /// <summary>For a string: the byte offset (from the token's start) where each character starts, plus the end; null when one char is one byte.</summary>
+    /// <summary>For a string: the byte offset (from the token's start) where each UTF-16 unit starts, plus the end; null when one char is one byte.</summary>
     public int[]? CharStarts { get; set; }
 
     public int Chars => CharStarts is { } c ? c.Length - 1 : Length;
@@ -41,20 +41,32 @@ internal sealed class ByteToken(ByteKind kind, int offset, int length)
     /// <summary>The absolute byte offset where character <paramref name="index"/> starts (the end for the count).</summary>
     public int ByteAt(int index) => Offset + (CharStarts is { } c ? c[Math.Clamp(index, 0, c.Length - 1)] : Math.Clamp(index, 0, Length));
 
-    /// <summary>The character holding absolute byte <paramref name="offset"/>.</summary>
+    /// <summary>The character holding absolute byte <paramref name="offset"/>: the first unit of a pair, never its second.</summary>
     public int CharAt(int offset)
     {
         var rel = Math.Clamp(offset - Offset, 0, Length);
         if (CharStarts is not { } c) return rel;
         var i = Array.BinarySearch(c, rel);
-        return i >= 0 ? Math.Min(i, c.Length - 2) : ~i - 1;
+        if (i < 0) i = ~i - 1;
+        while (i > 0 && c[i - 1] == c[i]) i--;   // a pair shares its start: the high unit
+        return Math.Min(i, c.Length - 2);
+    }
+
+    /// <summary>The unit after the character holding byte <paramref name="offset"/>: past both units of a pair.</summary>
+    public int CharEndAt(int offset)
+    {
+        var at = CharAt(offset);
+        if (CharStarts is not { } c) return at + 1;
+        var i = at + 1;
+        while (i < c.Length - 1 && c[i] == c[at]) i++;
+        return i;
     }
 
     /// <summary>The characters [From, To) that the bytes [<paramref name="a"/>, <paramref name="b"/>) touch.</summary>
     public (int From, int To) CharRange(int a, int b)
     {
         if (b <= Offset || a >= End) return (0, 0);
-        return (a <= Offset ? 0 : CharAt(a), b >= End ? Chars : CharAt(b - 1) + 1);
+        return (a <= Offset ? 0 : CharAt(a), b >= End ? Chars : CharEndAt(b - 1));
     }
 }
 
@@ -151,7 +163,9 @@ internal sealed class ByteStream
         }
     }
 
-    // The character starts of the text in [a, b), relative to a, plus the end; null for plain ASCII.
+    // The byte start of each UTF-16 unit of the text in [a, b), relative to a, plus the end; null
+    // for plain ASCII. Units, not code points: the text is a .NET string, and a character outside
+    // the BMP is two units with the same start, so Chars == PlainText.Length always holds.
     private int[]? CharStartsOf(int a, int b)
     {
         var starts = new List<int>();
@@ -161,6 +175,7 @@ internal sealed class ByteStream
             starts.Add(i - a);
             var l = Math.Max(1, CharLength(Bytes, i));
             if (l > 1) ascii = false;
+            if (l == 4) starts.Add(i - a);
             i += l;
         }
         starts.Add(b - a);
@@ -460,6 +475,13 @@ internal sealed class ByteStream
                 {
                     if (col >= cols) NewLine(t.ByteAt(from));
                     var take = Math.Min(cols - col, text.Length - from);
+                    // Never between the two units of a pair: one less, or the pair starts the next line.
+                    if (from + take < text.Length && char.IsHighSurrogate(text[from + take - 1]))
+                    {
+                        if (take > 1) take--;
+                        else if (col > 0) { NewLine(t.ByteAt(from)); continue; }
+                        else take = 2;   // a line narrower than a pair: it overflows by one
+                    }
                     line!.Parts.Add((t, from, from + take, col));
                     col  += take;
                     from += take;

@@ -392,7 +392,7 @@ internal static partial class NetView
                     if (t.Kind == ByteKind.Str)
                     {
                         var c = from + (int)((mouse.X - px) / cw);
-                        _hoverBytes = (t.ByteAt(c), t.ByteAt(c + 1));
+                        _hoverBytes = (t.ByteAt(c), t.CharEndAt(t.ByteAt(c)) is var e ? t.ByteAt(e) : t.End);
                     }
                     else _hoverBytes = (t.Offset, t.End);
                 }

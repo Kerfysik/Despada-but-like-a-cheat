@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 using System.Numerics;
+using Despada.Core;
 using ImGuiNET;
 
 namespace Despada.ImGui.UserInterface;
@@ -93,6 +94,12 @@ internal static unsafe class ConsolePanel
 
     // Text put into the input from outside: the caret goes after it (a refocus would select it all).
     private static bool _caretToEnd;
+    // Text to put into the input while it may be active (a click on a suggestion): an active
+    // InputText writes its own buffer back over s.Input, so the swap happens inside its callback.
+    private static string? _pendingReplace;
+    // The last frame the callback ran: a gap means the field was re-activated, which ImGui does as
+    // a tabbing request that selects everything. The rule: re-activating the console never selects.
+    private static int _cbFrame = -1;
 
     /// <summary>The finder's Commands tab.</summary>
     internal sealed class CommandSource : IFinderSource
@@ -356,6 +363,12 @@ internal static unsafe class ConsolePanel
             _inputCallback);
         io.ConfigInputTextEnterKeepActive = keepAfter;
         InputActive = ImGuiNET.ImGui.IsItemActive();
+        // A click anywhere in the overlay (the header, a toggle, a scrollbar) takes the keyboard from
+        // the input; once the button is up and nothing else holds it, the input has it again.
+        if (!InputActive && ImGuiNET.ImGui.IsMouseReleased(ImGuiMouseButton.Left) && !ImGuiNET.ImGui.IsAnyItemActive()
+            && !ImGuiNET.ImGui.IsPopupOpen("", ImGuiPopupFlags.AnyPopupId) && _renaming < 0 && !Finder.IsOpen
+            && ImGuiNET.ImGui.IsWindowHovered(ImGuiHoveredFlags.RootAndChildWindows))
+            RequestFocus();
         if (clipKeep is not null) Clipboard.Set(clipKeep);
 
         if (submitted && !_enterAccepted)
@@ -629,15 +642,27 @@ internal static unsafe class ConsolePanel
         var at  = new Vector2(winPos.X + 4f * D, winPos.Y + winSz.Y - bar - h - 4f * D);
         Widgets.Completions(ImGuiNET.ImGui.GetWindowDrawList(), at, _sugBuf.AsSpan(0, matches.Count), sel, text, out _, out _, out var hover, shadow: false);
         // A click on a row takes it, as Tab would.
-        if (hover >= 0 && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        if (hover >= 0 && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Left) && ImGuiNET.ImGui.IsWindowHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem))
         {
-            s.Input = matches[hover].Name + " ";
+            _pendingReplace = matches[hover].Name + " ";
             _sugIndex = 0;
             RequestFocus();
         }
     }
 
+    // Called from native code: an exception must not unwind through cimgui's frames (that aborts
+    // the process on Linux and macOS, and WindowGuard never sees it).
     private static int InputCallback(ImGuiInputTextCallbackData* raw)
+    {
+        try { return InputCallbackCore(raw); }
+        catch (Exception ex)
+        {
+            Log.Warn("console", $"input: {ex.GetType().Name}: {ex.Message}");
+            return 0;
+        }
+    }
+
+    private static int InputCallbackCore(ImGuiInputTextCallbackData* raw)
     {
         var data = new ImGuiInputTextCallbackDataPtr(raw);
         var s    = Active;
@@ -649,11 +674,22 @@ internal static unsafe class ConsolePanel
             data.DeleteChars(0, data.BufTextLen);
             _lastCursor = _lastLen = 0;
         }
+        var frame = ImGuiNET.ImGui.GetFrameCount();
+        var reactivated = frame - _cbFrame > 1;
+        _cbFrame = frame;
+        if (_pendingReplace is { } rep)
+        {
+            _pendingReplace = null;
+            Replace(data, rep);
+            _caretToEnd = true;
+        }
         if (_caretToEnd)
         {
             _caretToEnd = false;
             data.CursorPos = data.SelectionStart = data.SelectionEnd = data.BufTextLen;
         }
+        else if (reactivated && data.BufTextLen > 0)
+            SetCursor(data, _lastLen == data.BufTextLen && _lastCursor >= 0 ? Math.Clamp(_lastCursor, 0, data.BufTextLen) : data.BufTextLen);
 
         // The field stays active across a session switch (hotkeys, commands), and an active
         // InputText doesn't reload the user buffer: swap the text in, or the old session's line

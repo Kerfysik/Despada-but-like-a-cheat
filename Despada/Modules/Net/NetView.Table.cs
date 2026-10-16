@@ -118,12 +118,16 @@ internal static partial class NetView
     {
         var cw    = ImGuiNET.ImGui.CalcTextSize("M").X;
         var x     = cols.X0 + depth * cw * 2f;
-        var nameW = 0f;
-        foreach (var n in nodes)
-            nameW = MathF.Max(nameW, (n.CanExpand ? cw * 2f : 0f) + ImGuiNET.ImGui.CalcTextSize(n.Name).X);
-        if (parent.Value is { } pv && NetDecode.IsSequenceValue(pv) && NetDecode.CountOf(pv) is var count and > 0)
-            nameW = MathF.Max(nameW, cw * 2f + ImGuiNET.ImGui.CalcTextSize($"[{count - 1}]").X);
-        cols = cols with { ValueX = x + nameW + cw * 2f };
+        if (parent.NameColFor != nodes.Count || parent.NameColCw != cw)   // measured once, not per frame
+        {
+            var nameW = 0f;
+            foreach (var n in nodes)
+                nameW = MathF.Max(nameW, (n.CanExpand ? cw * 2f : 0f) + ImGuiNET.ImGui.CalcTextSize(n.Name).X);
+            if (parent.Value is { } pv && NetDecode.IsSequenceValue(pv) && NetDecode.CountOf(pv) is var count and > 0)
+                nameW = MathF.Max(nameW, cw * 2f + ImGuiNET.ImGui.CalcTextSize($"[{count - 1}]").X);
+            parent.NameColW = nameW; parent.NameColFor = nodes.Count; parent.NameColCw = cw;
+        }
+        cols = cols with { ValueX = x + parent.NameColW + cw * 2f };
         for (var i = 0; i < nodes.Count; i++)
         {
             var n    = nodes[i];

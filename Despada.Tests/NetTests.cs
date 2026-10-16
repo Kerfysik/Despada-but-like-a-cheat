@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+using Despada.Config;
+using Despada.Core;
 using Despada.ImGui.UserInterface;
 using Despada.Modules.Net;
 using Xunit;
@@ -44,6 +46,10 @@ public sealed class SnapProbe
     public Stack<int> Order = new([1, 2, 3]);
 }
 public sealed class SnapHolder { public Dictionary<string, int[]> Map = new(); public SnapInner? Inner; }
+public sealed class SnapOptional { public FakeCoordinates? Where; public SnapInner? Inner; public int Id = 3; }
+public sealed class SnapStructs { public List<FakeVector2> Points = [new() { X = 1 }, new() { X = 2 }]; }
+public sealed class SnapNest { public int A; public SnapInner? Deep; }
+public sealed class SnapNesting { public SnapNest? Outer; public int Id = 1; }
 public sealed class SnapHuge { public byte[] Big = new byte[10]; public int[] Many = new int[60_000]; public int After = 42; }
 public sealed class MsgState { }
 public sealed class MsgStateAck { }
@@ -815,7 +821,7 @@ public class NetDecodeTests
     public void ScheduledSendsRespectTheRateLimit()
     {
         NetActive.Reset();
-        NetActive.Armed = true;
+        NetActive.Armed = true; NetActive.AssumeConnected = true;
         NetActive.RateLimit = 3;
         var runs = 0;
         NetActive.Schedule(5, 0, () => runs++);
@@ -861,7 +867,7 @@ public class NetDecodeTests
         var r = new NetRule { Action = RuleAction.Duplicate, Count = 3, EveryMs = 1000 };
         r.SetFilter("type:MsgChat");
         NetActive.Rules.Add(r);
-        NetActive.Armed = true;
+        NetActive.Armed = true; NetActive.AssumeConnected = true;
         var p = new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.Out, Size = 9, Message = new MsgChatMessage(), Summary = "" };
         Assert.True(NetActive.Apply(p));                      // the original goes on
         Assert.Equal(PacketMark.Duplicated, p.Mark);
@@ -1099,5 +1105,198 @@ public class FinderWalkTests
         Assert.True(ents.Expanded);
         Assert.Equal(4, ents.Page);                                   // paged out to the item
         Assert.Equal(350, NetDecode.Children(ents).Count);            // the fourth page shows the rest
+    }
+}
+
+public class ReviewBlockOneTests
+{
+    [Fact]
+    public void AgeTokensThatTimeSpanCannotHoldAreInvalid()
+    {
+        Assert.Null(NetQuery.ParseAge("nans"));
+        Assert.Null(NetQuery.ParseAge("Infinitys"));
+        Assert.Null(NetQuery.ParseAge("999999999h"));
+        Assert.Equal(TimeSpan.FromMinutes(5), NetQuery.ParseAge("5m"));
+    }
+
+    [Fact]
+    public void NullFieldsStayNullUnlessEdited()
+    {
+        var d = PacketDraft.From(new Packet { Type = typeof(SnapOptional), Dir = NetDir.Out, Message = new SnapOptional(), Seq = 999_990 })!;
+        var built = (SnapOptional)DraftBuilder.Build(d, out _);
+        Assert.Null(built.Where);                            // a nullable struct: not a default instance
+        Assert.Null(built.Inner);                            // an optional object: not a fresh one
+        d.Walk().First(x => x.Path == "Where.Position.X").Field.Value = "4";
+        built = (SnapOptional)DraftBuilder.Build(d, out _);
+        Assert.Equal(4f, built.Where!.Value.Position.X);     // edited under it: it exists now
+        Assert.Null(built.Inner);
+    }
+
+    [Fact]
+    public void StructListItemsAreNotEditedInTheirSource()
+    {
+        var d = PacketDraft.From(new Packet { Type = typeof(SnapStructs), Dir = NetDir.Out, Message = new SnapStructs(), Seq = 999_989 })!;
+        var x0 = d.Walk().First(x => x.Path.Contains("[0]") && x.Path.EndsWith(".X")).Field;
+        x0.Value = "5";
+        Assert.Equal(5f, ((SnapStructs)DraftBuilder.Build(d, out _)).Points[0].X);
+        x0.Value = x0.Original;                              // reverted: the next send carries the original
+        Assert.Equal(1f, ((SnapStructs)DraftBuilder.Build(d, out _)).Points[0].X);
+    }
+
+    [Fact]
+    public void ANodeMadeFreshTakesItsNestedNodesWhole()
+    {
+        // Outer is null in the capture; editing under it makes it, and everything under a made node
+        // comes whole (setAll), as before: Deep is a default instance, not null.
+        var d = PacketDraft.From(new Packet { Type = typeof(SnapNesting), Dir = NetDir.Out, Message = new SnapNesting(), Seq = 999_988 })!;
+        d.Walk().First(x => x.Path == "Outer.A").Field.Value = "1";
+        var built = (SnapNesting)DraftBuilder.Build(d, out _);
+        Assert.Equal(1, built.Outer!.A);
+        Assert.NotNull(built.Outer.Deep);
+    }
+
+    [Fact]
+    public void ReleaseSurvivesADisarmAndADrop()
+    {
+        NetActive.Reset(); NetActive.Rules.Clear();
+        NetActive.Armed = true; NetActive.AssumeConnected = true;
+        try
+        {
+            var p = new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Message = new object(), Mark = PacketMark.Frozen, Summary = "" };
+            lock (NetActive.Sync) NetActive.Frozen.Add(p);
+            NetActive.Release(p);
+            Assert.Equal(PacketMark.Releasing, p.Mark);
+            Assert.Equal(1, NetActive.PendingSends);
+            NetActive.Armed = false; NetActive.Pump();                      // disarmed: the queue goes, the packet is frozen again
+            Assert.Equal(PacketMark.Frozen, p.Mark);
+            Assert.Contains(p, NetActive.FrozenSnapshot());
+            NetActive.Armed = true;
+            NetActive.Release(p);
+            NetActive.Drop(p);                                              // dropped while queued: the send is void
+            NetActive.Pump();
+            Assert.Equal(PacketMark.Blocked, p.Mark);
+            Assert.DoesNotContain(p, NetActive.FrozenSnapshot());
+        }
+        finally { NetActive.Reset(); }
+    }
+
+    [Fact]
+    public void QueuedSendsGoWithTheirRuleAndAreCapped()
+    {
+        NetActive.Reset(); NetActive.Rules.Clear();
+        NetActive.Armed = true;
+        NetActive.AssumeConnected = true;
+        try
+        {
+            var r = new NetRule { Action = RuleAction.Duplicate }; r.SetFilter("type:Msg");
+            NetActive.Rules.Add(r);
+            var ran = 0;
+            NetActive.Schedule(5, 0, () => ran++, owner: r);
+            Assert.Equal(5, NetActive.PendingSends);
+            NetActive.Rules.Remove(r);
+            NetActive.Pump();
+            Assert.Equal(0, ran);                            // the rule is gone: so are its sends
+            Assert.Equal(0, NetActive.PendingSends);
+
+            var batch = new object();
+            NetActive.Schedule(1000, 1, () => ran++, owner: batch);
+            NetActive.Schedule(1000, 1, () => ran++, owner: batch);
+            Assert.Equal(NetActive.RateLimit * 30, NetActive.PendingSends);   // half a minute at the rate limit
+            Assert.Equal(2000 - NetActive.RateLimit * 30, NetActive.DroppedSends);
+            // Due order across owners: a send asked for now goes before a burst's later copies.
+            var order = new List<string>();
+            NetActive.CancelPending();
+            NetActive.Schedule(3, 1000, () => order.Add("burst"), owner: new object());
+            NetActive.Schedule(1, 0, () => order.Add("now"), owner: new object());
+            NetActive.Pump();
+            Assert.Equal(["burst", "now"], order);                             // the burst's first copy is due now too, in that order; its later copies wait
+        }
+        finally { NetActive.AssumeConnected = false; NetActive.Reset(); }
+    }
+}
+
+public class ReviewBlockTwoTests
+{
+    [Fact]
+    public void KeyMapFallsBackToTheKnownLayout()
+    {
+        Assert.Equal(ImGuiNET.ImGuiKey.Delete, Despada.ImGui.KeyMap.ToImGuiKey((byte)83));
+        Assert.Equal(ImGuiNET.ImGuiKey.F13, Despada.ImGui.KeyMap.ToImGuiKey((byte)106));
+        Assert.Equal(ImGuiNET.ImGuiKey.Pause, Despada.ImGui.KeyMap.ToImGuiKey((byte)118));
+        Assert.Equal(ImGuiNET.ImGuiKey.None, Despada.ImGui.KeyMap.ToImGuiKey((byte)250));
+        Assert.True(Despada.ImGui.KeyMap.IsMouseKey((byte)1));
+        Assert.False(Despada.ImGui.KeyMap.IsMouseKey((byte)10));
+        Assert.Equal(4, Despada.ImGui.KeyMap.MouseKeyToImGuiButton((byte)5));
+        Assert.Equal(-1, Despada.ImGui.KeyMap.MouseKeyToImGuiButton((byte)9));
+    }
+
+    [Fact]
+    public void AnUnknownRuleActionLoadsOffNotAsBlock()
+    {
+        var r = NetRule.FromDto(new NetRule.Dto { Filter = "type:Msg", Action = "explode", Modify = null! });
+        Assert.False(r.Enabled);
+        Assert.NotEqual(RuleAction.Block, r.Action);
+        Assert.Contains("explode", r.Error);
+        Assert.Equal("", r.Modify);
+        Assert.False(r.Matches(new Packet { Type = typeof(MsgState), Summary = "" }));
+    }
+
+    [Fact]
+    public void SettingsListsKeepWhatTheyCannotRead()
+    {
+        var raw = System.Text.Json.JsonSerializer.SerializeToElement(new object[]
+        {
+            new { Filter = "type:A", Action = "block" },
+            new { Filter = 5, Action = new[] { 1 } },      // not a rule: kept as it is
+            new { Filter = "type:B", Action = "mute" },
+        });
+        DespadaConfig.Update(c => { if (!c.Features.TryGetValue("t-lists", out var f)) c.Features["t-lists"] = f = new FeatureSettings(); f.Values["rules"] = raw; });
+        var (items, unread) = Features.GetSettingItems<NetRule.Dto>("t-lists", "rules");
+        Assert.Equal(["type:A", "type:B"], items.Select(i => i.Filter));
+        Assert.Single(unread);
+        Features.SetSettingItems("t-lists", "rules", items.Take(1), unread);
+        var (again, unread2) = Features.GetSettingItems<NetRule.Dto>("t-lists", "rules");
+        Assert.Equal(["type:A"], again.Select(i => i.Filter));
+        Assert.Single(unread2);                           // written back untouched
+    }
+
+    [Fact]
+    public void SavedPacketSnapshotTravelsAsAStringAndOldFilesStillRead()
+    {
+        var p = new Packet { Type = typeof(SnapProbe), Dir = NetDir.Out, Message = new SnapProbe(), Seq = 999_980 };
+        var saved = SavedPacket.FromDraft(PacketDraft.From(p)!, "s");
+        var dto = saved.ToDto();
+        Assert.Equal(System.Text.Json.JsonValueKind.String, dto.Source!.Value.ValueKind);
+        Assert.NotNull(SavedPacket.FromDto(dto).Source);
+        // An older file: the node as a JSON object.
+        var old = System.Text.Json.JsonSerializer.SerializeToElement(saved.Source, new System.Text.Json.JsonSerializerOptions { MaxDepth = 256 });
+        dto.Source = old;
+        Assert.NotNull(SavedPacket.FromDto(dto).Source);
+        dto.Values = null;
+        Assert.NotNull(SavedPacket.FromDto(dto).Values);
+    }
+}
+
+public class ReviewBlockThreeTests
+{
+    [Fact]
+    public void GrowingTheBufferDoesNotClaimPacketsItNeverKept()
+    {
+        NetActive.Reset(); NetActive.Rules.Clear(); NetCapture.Clear();
+        var before = NetCapture.Capacity;
+        try
+        {
+            NetCapture.Capacity = 1000;
+            for (var i = 0; i < 1200; i++) NetCapture.Add(new Packet { Type = typeof(MsgChatMessage), Dir = NetDir.In, Size = 1 });
+            Assert.Equal(1000, NetCapture.Count);
+            var oldest = NetCapture.FirstSeq;
+            NetCapture.Capacity = 4000;
+            Assert.Equal(1000, NetCapture.Count);
+            Assert.Equal(oldest, NetCapture.FirstSeq);
+            Assert.Equal(1000, NetCapture.Snapshot().Count);
+            // The type's list follows the ring: the 200 pushed out are not kept by it either.
+            Assert.Equal(1000, NetCapture.TypeStats("MsgChatMessage").Kept);
+        }
+        finally { NetCapture.Clear(); NetCapture.Capacity = before; }
     }
 }

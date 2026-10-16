@@ -5,6 +5,7 @@
 using System.Reflection;
 using Despada.Config;
 using Despada.Core;
+using Despada.ImGui;
 using Despada.ImGui.Hook;
 
 public static class MarseyEntry
@@ -39,9 +40,14 @@ public static class MarseyEntry
         // Find everything first, then hook; each step only disables what depends on a missing piece.
         Engine.ResolveAll();
         Lifecycle.Install();
-        ClydeRenderHook.Install();
-        ImGuiInputHook.Install();
-        ImGuiSdl3TextInputStopPatch.Install();
+        // No render hook, no overlay: the input hooks would only eat the toggle key and queue
+        // events nothing ever drains.
+        if (ClydeRenderHook.Install())
+        {
+            ImGuiInputHook.Install();
+            ImGuiSdl3TextInputStopPatch.Install();
+        }
+        else ImGuiRenderer.Disable("render hook not installed");
         Features.Initialize();
 
         Sedition.Hide();

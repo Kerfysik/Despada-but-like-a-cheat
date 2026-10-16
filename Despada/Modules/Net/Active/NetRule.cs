@@ -73,12 +73,16 @@ internal sealed class NetRule
 
     public static NetRule FromDto(Dto d)
     {
+        // An action this build doesn't know (a typo, a newer build) loads off with its error,
+        // never as Block, the one action that would do the most harm by mistake.
+        var known = Enum.TryParse<RuleAction>(d.Action ?? "", ignoreCase: true, out var a);
         var r = new NetRule
         {
-            Action = Enum.TryParse<RuleAction>(d.Action, ignoreCase: true, out var a) ? a : RuleAction.Block,
-            Enabled = d.Enabled, Count = d.Count, EveryMs = d.EveryMs, Modify = d.Modify, Pinned = true,
+            Action = known ? a : RuleAction.Mute,
+            Enabled = known && d.Enabled, Count = Math.Max(1, d.Count), EveryMs = Math.Max(0, d.EveryMs), Modify = d.Modify ?? "", Pinned = true,
+            Error = known ? null : $"unknown action '{d.Action}'",
         };
-        r.SetFilter(d.Filter);
+        r.SetFilter(d.Filter ?? "");
         return r;
     }
 

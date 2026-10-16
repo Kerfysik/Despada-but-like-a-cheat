@@ -209,7 +209,7 @@ public static class Theme
 
         colors[(int)ImGuiCol.TableHeaderBg]     = P.Deep;
         colors[(int)ImGuiCol.TableBorderStrong] = P.Sep;
-        colors[(int)ImGuiCol.TableBorderLight]  = WithAlpha(P.Sep, 0.5f);
+        colors[(int)ImGuiCol.TableBorderLight]  = Fade(P.Sep, 0.5f);
         colors[(int)ImGuiCol.TableRowBg]        = Vector4.Zero;
         colors[(int)ImGuiCol.TableRowBgAlt]     = P.Deep;
 
@@ -237,7 +237,10 @@ public static class Theme
     // Goes through ImGui so style.Alpha (and with it BeginDisabled) dims custom-drawn widgets too.
     public static uint ToU32(Vector4 c) => ImGuiNET.ImGui.GetColorU32(c);
 
+    /// <summary>The colour with this alpha (for raw constants; a token's own alpha is replaced).</summary>
     public static Vector4 WithAlpha(Vector4 c, float a) => new(c.X, c.Y, c.Z, a);
+    /// <summary>The colour at a fraction of its own alpha: for anything derived from a palette token.</summary>
+    public static Vector4 Fade(Vector4 c, float k) => new(c.X, c.Y, c.Z, c.W * k);
 
     public static Vector4 Mix(Vector4 a, Vector4 b, float t) => a + (b - a) * t;
 }

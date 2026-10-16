@@ -114,7 +114,7 @@ public static partial class Widgets
 
         var iW     = MathF.Max(maxTW + 28f, itemMin);
         var totalW = closeW + iW * visN + (needPaging ? arrowW * 2f : 0f);
-        var sepCol = Theme.ToU32(Theme.WithAlpha(Theme.P.Sep, 0.5f));
+        var sepCol = Theme.ToU32(Theme.Fade(Theme.P.Sep, 0.5f));
         var hovCol = Theme.Mix(Theme.P.Raised, Theme.P.Sep, 0.5f);
 
         ImGuiNET.ImGui.SetNextWindowPos(new Vector2(bMin.X, bMax.Y + 1f));

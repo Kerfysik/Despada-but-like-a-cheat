@@ -13,8 +13,8 @@ public static class ClydeRenderHook
 {
     private static MethodInfo? _renderFrameMethod;
 
-    /// <summary>Calls ImGuiRenderer.RenderFrame() inside Clyde.Render, right after the final screenshot.</summary>
-    public static void Install()
+    /// <summary>Calls ImGuiRenderer.RenderFrame() inside Clyde.Render, right after the final screenshot. False when the hook did not take.</summary>
+    public static bool Install()
         => Hooks.Transpiler("render", Engine.ClydeRender, nameof(Transpiler), typeof(ClydeRenderHook));
 
     private static IEnumerable<CodeInstruction> Transpiler(

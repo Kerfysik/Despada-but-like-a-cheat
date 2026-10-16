@@ -170,19 +170,15 @@ internal sealed class NetQuery
         return double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? (long)(v * mul) : null;
     }
 
-    // "-30s", "30s", "5m", "1h"
+    // "-30s", "30s", "5m", "1h"; a finite, non-negative span that TimeSpan can hold, else invalid.
     internal static TimeSpan? ParseAge(string s)
     {
         s = s.TrimStart('-');
         if (s.Length < 2) return null;
         if (!double.TryParse(s[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var v)) return null;
-        return s[^1] switch
-        {
-            's' => TimeSpan.FromSeconds(v),
-            'm' => TimeSpan.FromMinutes(v),
-            'h' => TimeSpan.FromHours(v),
-            _   => null,
-        };
+        var seconds = s[^1] switch { 's' => v, 'm' => v * 60, 'h' => v * 3600, _ => double.NaN };
+        if (!double.IsFinite(seconds) || seconds < 0 || seconds > TimeSpan.MaxValue.TotalSeconds) return null;
+        return TimeSpan.FromSeconds(seconds);
     }
 
     // Types starting with the text first, then those containing it.

@@ -234,6 +234,7 @@ internal static class Finder
         {
             g.Items.InsertRange(0, g.Fresh);
             g.Fresh.Clear();
+            if (g.Items.Count > Limit) g.Items.RemoveRange(Limit, g.Items.Count - Limit);   // a group never holds more than its limit: the newest
         }
         _hits.Clear();
         foreach (var g in _groups)

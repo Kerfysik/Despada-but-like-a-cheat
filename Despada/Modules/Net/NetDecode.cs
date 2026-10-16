@@ -30,6 +30,11 @@ internal sealed class FieldNode(string name, object? value, int depth)
     /// <summary>A "… N more" row: the node whose next page it opens.</summary>
     public FieldNode? PageOf { get; set; }
 
+    // The table's name column for this node's children: measured once per (count, font).
+    internal float NameColW;
+    internal int   NameColFor = -1;
+    internal float NameColCw;
+
     public void ShowMore(bool all)
     {
         Page = all ? int.MaxValue : Page + 1;
@@ -595,8 +600,23 @@ internal static class NetDecode
         return f?.GetValue(o);
     }
 
-    // Only bounded collections are listed: arrays and anything with a Count.
-    private static bool IsSequence(object v) => v is Array or ICollection || ReadOnlyCount(v) is not null;
+    // Only bounded collections are listed: arrays and anything with a Count. What a type is
+    // (a sequence, its Count, its item type) is asked of reflection once per type, not per node:
+    // GetInterfaces allocates, and a big packet has thousands of nodes of a few types.
+    private sealed record SeqInfo(bool IsSeq, PropertyInfo? Count, Type? Item);
+    private static readonly ConcurrentDictionary<Type, SeqInfo> _seq = new();
+
+    private static SeqInfo SeqOf(Type t) => _seq.GetOrAdd(t, static t =>
+    {
+        if (t == typeof(string)) return new SeqInfo(false, null, null);
+        var ifaces = t.GetInterfaces();
+        var ro = ifaces.FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IReadOnlyCollection<>));
+        var en = t.IsArray ? null : ifaces.FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
+        var isSeq = t.IsArray || typeof(ICollection).IsAssignableFrom(t) || ro is not null;
+        return new SeqInfo(isSeq, ro?.GetProperty("Count"), t.IsArray ? t.GetElementType() : en?.GetGenericArguments()[0]);
+    });
+
+    private static bool IsSequence(object v) => v is Array or ICollection || SeqOf(v.GetType()).IsSeq;
     internal static bool IsSequenceValue(object v) => IsSequence(v);
     internal static int CountOf(object v) => Count(v);
 
@@ -607,23 +627,13 @@ internal static class NetDecode
         _             => ReadOnlyCount(v) ?? 0,
     };
 
-    private static int? ReadOnlyCount(object v)
-    {
-        if (v is string) return null;
-        var iface = v.GetType().GetInterfaces().FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IReadOnlyCollection<>));
-        return iface?.GetProperty("Count")?.GetValue(v) as int?;
-    }
+    private static int? ReadOnlyCount(object v) => SeqOf(v.GetType()).Count?.GetValue(v) as int?;
 
     private static string TickValue(object? tick) => tick is null ? "?" : Read(tick, "Value")?.ToString() ?? "?";
 
     private static string Fmt(object? v) => v is IFormattable f ? f.ToString("0.##", CultureInfo.InvariantCulture) : v?.ToString() ?? "?";
 
-    private static Type? ItemType(Type seq)
-    {
-        if (seq.IsArray) return seq.GetElementType();
-        var e = seq.GetInterfaces().FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
-        return e?.GetGenericArguments()[0];
-    }
+    private static Type? ItemType(Type seq) => SeqOf(seq).Item;
 
     internal static string FriendlyName(Type t)
     {

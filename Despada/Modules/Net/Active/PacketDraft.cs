@@ -255,6 +255,7 @@ internal sealed class PacketDraft
             Fill(item, et, null, depth + 1);
         }
         else Describe(item, et, value, depth);
+        if (item.Kind == DraftKind.Readonly) item.Source = value;   // rebuilt as it was, not as null
         return item;
     }
 
