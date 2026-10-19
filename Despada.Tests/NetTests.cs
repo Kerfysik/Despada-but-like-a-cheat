@@ -1218,16 +1218,40 @@ public class ReviewBlockOneTests
 public class ReviewBlockTwoTests
 {
     [Fact]
-    public void KeyMapFallsBackToTheKnownLayout()
+    public void SdlKeysMapKeycodesAndBindableNames()
     {
-        Assert.Equal(ImGuiNET.ImGuiKey.Delete, Despada.ImGui.KeyMap.ToImGuiKey((byte)83));
-        Assert.Equal(ImGuiNET.ImGuiKey.F13, Despada.ImGui.KeyMap.ToImGuiKey((byte)106));
-        Assert.Equal(ImGuiNET.ImGuiKey.Pause, Despada.ImGui.KeyMap.ToImGuiKey((byte)118));
-        Assert.Equal(ImGuiNET.ImGuiKey.None, Despada.ImGui.KeyMap.ToImGuiKey((byte)250));
-        Assert.True(Despada.ImGui.KeyMap.IsMouseKey((byte)1));
-        Assert.False(Despada.ImGui.KeyMap.IsMouseKey((byte)10));
-        Assert.Equal(4, Despada.ImGui.KeyMap.MouseKeyToImGuiButton((byte)5));
-        Assert.Equal(-1, Despada.ImGui.KeyMap.MouseKeyToImGuiButton((byte)9));
+        // ImGui.NET lives inside Despada.dll: its resolver must be up before a method naming ImGuiKey is compiled.
+        EmbeddedAssemblies.Install();
+        SdlKeysChecks();
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void SdlKeysChecks()
+    {
+        const uint sc = 1u << 30;
+        Assert.Equal(ImGuiNET.ImGuiKey.Delete, Despada.ImGui.Hook.InputKeys.FromSdlKeycode(0x7f));
+        Assert.Equal(ImGuiNET.ImGuiKey.A, Despada.ImGui.Hook.InputKeys.FromSdlKeycode('a'));
+        Assert.Equal(ImGuiNET.ImGuiKey._7, Despada.ImGui.Hook.InputKeys.FromSdlKeycode('7'));
+        Assert.Equal(ImGuiNET.ImGuiKey.F12, Despada.ImGui.Hook.InputKeys.FromSdlKeycode(sc | 0x45));
+        Assert.Equal(ImGuiNET.ImGuiKey.F13, Despada.ImGui.Hook.InputKeys.FromSdlKeycode(sc | 0x68));
+        Assert.Equal(ImGuiNET.ImGuiKey.Keypad0, Despada.ImGui.Hook.InputKeys.FromSdlKeycode(sc | 0x62));
+        Assert.Equal(ImGuiNET.ImGuiKey.Keypad9, Despada.ImGui.Hook.InputKeys.FromSdlKeycode(sc | 0x61));
+        Assert.Equal(ImGuiNET.ImGuiKey.LeftShift, Despada.ImGui.Hook.InputKeys.FromSdlKeycode(sc | 0xe1));
+        Assert.Equal(ImGuiNET.ImGuiKey.None, Despada.ImGui.Hook.InputKeys.FromSdlKeycode(sc | 0x11a));
+        Assert.Equal(ImGuiNET.ImGuiKey.Delete, Despada.ImGui.Hook.InputKeys.ByName("Delete"));
+        Assert.Equal(ImGuiNET.ImGuiKey.F12, Despada.ImGui.Hook.InputKeys.ByName("f12"));
+        Assert.Equal(ImGuiNET.ImGuiKey.F24, Despada.ImGui.Hook.InputKeys.ByName("F24"));
+        Assert.Null(Despada.ImGui.Hook.InputKeys.ByName("A"));
+        Assert.Equal("PageUp", Despada.ImGui.Hook.InputKeys.NameOf(ImGuiNET.ImGuiKey.PageUp));
+        Assert.Null(Despada.ImGui.Hook.InputKeys.NameOf(ImGuiNET.ImGuiKey.A));
+        // GLFW: by position, the US layout's codes.
+        Assert.Equal(ImGuiNET.ImGuiKey.Delete, Despada.ImGui.Hook.InputKeys.FromGlfw(261));
+        Assert.Equal(ImGuiNET.ImGuiKey.A, Despada.ImGui.Hook.InputKeys.FromGlfw('A'));
+        Assert.Equal(ImGuiNET.ImGuiKey.F12, Despada.ImGui.Hook.InputKeys.FromGlfw(301));
+        Assert.Equal(ImGuiNET.ImGuiKey.Keypad9, Despada.ImGui.Hook.InputKeys.FromGlfw(329));
+        Assert.Equal(ImGuiNET.ImGuiKey.LeftShift, Despada.ImGui.Hook.InputKeys.FromGlfw(340));
+        Assert.Equal(ImGuiNET.ImGuiKey.LeftBracket, Despada.ImGui.Hook.InputKeys.FromSdl(0xfc, 47));   // ü on the German layout: the bracket key by position
+        Assert.Equal(ImGuiNET.ImGuiKey.None, Despada.ImGui.Hook.InputKeys.FromGlfw(161));
     }
 
     [Fact]

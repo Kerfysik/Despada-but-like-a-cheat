@@ -671,6 +671,7 @@ internal static class NetActive
         MutedCount = 0;
         CancelPending();
         DroppedSends = 0;
+        _windowStart = 0; _sentInWindow = 0;
         AssumeConnected = false;
         DropAll();
     }

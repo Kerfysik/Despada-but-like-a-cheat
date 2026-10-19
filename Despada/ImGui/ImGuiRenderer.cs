@@ -55,36 +55,40 @@ public static class ImGuiRenderer
         if (!Lifecycle.TickHooked) Lifecycle.RunTick();
 
         if (_initFailed) return;
+        if (!ImGuiInputHook.Installed) ImGuiInputHook.Install();   // SDL3 is loaded by the time frames render
 
         // Wall clock, ticked even while nothing is drawn so a pending save isn't held back.
         var configDt = (float)_configClock.Elapsed.TotalSeconds;
         _configClock.Restart();
         DespadaConfig.Tick(configDt);
 
-        if (OverlayVisible != _prevOverlayVisible)
+        var visible = OverlayVisible;   // one read: the input thread may flip it mid-frame
+        if (visible != _prevOverlayVisible)
         {
-            _prevOverlayVisible = OverlayVisible;
-            SetCursorVisible(OverlayVisible);
+            _prevOverlayVisible = visible;
+            SetCursorVisible(visible);
             // A resize while hidden was never counted as stable: rebuild on the first frame shown.
-            if (OverlayVisible)
+            if (visible)
             {
                 _rebuildNow = true;
                 Opened++;
+                ImGuiInputHook.OnShown();
             }
 
             // Hidden: every key and button ImGui holds is released now, directly (a queued focus
             // event would only be applied at the next NewFrame, together with the "focus back"
             // event, and the pair cancels out); the key-ups themselves go to the game meanwhile.
-            if (_initialized && !OverlayVisible)
+            if (_initialized && !visible)
             {
                 var io = ImGuiNET.ImGui.GetIO();
+                io.ClearEventsQueue();   // events still trickling would come back as held keys after the clear
                 io.ClearInputKeys();
                 io.ClearInputMouse();
             }
 
             try
             {
-                if (OverlayVisible)
+                if (visible)
                     Shell.OnOpened();
                 else
                     Shell.OnClosed();
@@ -95,7 +99,7 @@ public static class ImGuiRenderer
                 return;
             }
 
-            if (!OverlayVisible)
+            if (!visible)
             {
                 UpdateSdlTextInput(false);
                 DespadaConfig.Flush();
@@ -103,11 +107,11 @@ public static class ImGuiRenderer
         }
 
         bool hasToasts = !_pendingToasts.IsEmpty || _activeToasts.Count > 0;
-        bool needRender = OverlayVisible || hasToasts;
+        bool needRender = visible || hasToasts;
 
         if (!needRender)
         {
-            ImGuiInputHook.FlushEvents();
+            ImGuiInputHook.FlushEvents(false);
             // Keep the frame clock running while nothing is drawn, so the first frame after opening
             // gets a normal DeltaTime instead of the 0.1 s clamp (animations would jump a step).
             _stopwatch.Restart();
@@ -157,7 +161,7 @@ public static class ImGuiRenderer
                 _configDirty = false;
                 ApplyTheme();
             }
-            ImGuiInputHook.FlushEvents();
+            ImGuiInputHook.FlushEvents(visible);
 
             GlStateGuard.Save();
             try
@@ -167,7 +171,7 @@ public static class ImGuiRenderer
 
                 ImGuiNET.ImGui.NewFrame();
 
-                ImGuiInputHook.SnapshotWantCapture();
+                ImGuiInputHook.SnapshotWantCapture(visible);
 
                 UpdateSdlTextInput(io.WantTextInput);
                 Clipboard.Tick(io.WantTextInput, _configClockTotal += elapsedSec);
@@ -175,7 +179,7 @@ public static class ImGuiRenderer
                 _toastDt = elapsedSec;
                 WindowGuard.Draw("Toasts", DrawToastsFrame);
 
-                if (OverlayVisible)
+                if (visible)
                     DrawUI();
 
                 ImGuiNET.ImGui.Render();
@@ -224,64 +228,13 @@ public static class ImGuiRenderer
         ImGuiInputHook.Reset();
     }
 
-    private static bool _sdlTextInputActive = false;
-
-    private static void UpdateSdlTextInput(bool wantTextInput)
-    {
-        if (wantTextInput == _sdlTextInputActive) return;
-        _sdlTextInputActive = wantTextInput;
-
-        if (wantTextInput)
-            CallWindowingTextInput("TextInputStart");
-        // Leave SDL text input on if a game text field (chat, etc.) still has focus.
-        else if (!GameHasKeyboardFocus())
-            CallWindowingTextInput("TextInputStop");
-    }
+    // Text input for the overlay's fields, through SDL itself (SdlInput); on GLFW characters always come.
+    private static void UpdateSdlTextInput(bool wantTextInput) => Hook.SdlInput.SyncTextInput(wantTextInput, GameHasKeyboardFocus);
 
     private static bool GameHasKeyboardFocus()
     {
         var ui = Engine.Ui.Instance;
         return ui is not null && AccessTools.Property(ui.GetType(), "KeyboardFocused")?.GetValue(ui) is not null;
-    }
-
-    private static void CallWindowingTextInput(string method)
-    {
-        try
-        {
-            var clyde     = Engine.ClydeManager.Instance;
-            if (clyde is null) return;
-
-            var clydeType = clyde.GetType();
-
-            object? windowing = null;
-            var     t         = clydeType;
-            while (t is not null && windowing is null)
-            {
-                windowing = AccessTools.Field(t, "_windowing")?.GetValue(clyde);
-                t         = t.BaseType;
-            }
-            if (windowing is null) return;
-
-            object? mainWindow = null;
-            t = clydeType;
-            while (t is not null && mainWindow is null)
-            {
-                mainWindow = AccessTools.Field(t, "_mainWindow")?.GetValue(clyde)
-                          ?? AccessTools.Field(t, "_mainReg")?.GetValue(clyde)
-                          ?? AccessTools.Property(t, "MainWindow")?.GetValue(clyde);
-                t = t.BaseType;
-            }
-            if (mainWindow is null) return;
-
-            AccessTools.Method(windowing.GetType(), method)
-                       ?.Invoke(windowing, [mainWindow]);
-
-            MarseyLogger.Info($"[ImGuiRenderer] SDL {method} called.");
-        }
-        catch (Exception ex)
-        {
-            MarseyLogger.Warn($"[ImGuiRenderer] {method}: {ex.Message}");
-        }
     }
 
     private static float _toastDt;

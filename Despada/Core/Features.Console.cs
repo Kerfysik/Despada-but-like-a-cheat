@@ -15,6 +15,13 @@ internal static partial class Features
         ConsoleCommands.Register(new ConsoleCommand("feature", "feature <id> [on|off]", "show or switch a feature", FeatureCmd));
         ConsoleCommands.Register(new ConsoleCommand("bind", "bind [all]", "engine bindings (missing ones, or all)", BindCmd));
         ConsoleCommands.Register(new ConsoleCommand("hooks", "hooks [owner]", "installed engine hooks", HooksCmd));
+        ConsoleCommands.Register(new ConsoleCommand("input", "input", "the input backend in use", InputCmd));
+    }
+
+    private static void InputCmd(ConsoleSession s, string[] a)
+    {
+        var backend = ImGui.Hook.SdlInput.Installed ? "SDL3 event filter" : ImGui.Hook.GlfwInput.Installed ? "GLFW callbacks" : "none";
+        s.Print(LineKind.Output, $"backend: {backend} ({ImGui.Hook.ImGuiInputHook.WindowingKind() ?? "no windowing"})");
     }
 
     // A feature's commands only run while it is on; otherwise they say why not.

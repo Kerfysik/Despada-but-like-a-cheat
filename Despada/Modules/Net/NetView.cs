@@ -432,9 +432,11 @@ internal static unsafe partial class NetView
         var selected = _multi.Count > 0 ? _multi.Contains(seq) : cursor;
         // What the active side did with it tints the row; the badge at the right end says what.
         var tint = MarkTint(mark);
-        if (open || hovered || doc || selected || tint is not null)
+        // The selection fill is for the selection only: an unfolded packet shows as its caret and
+        // the tree under it, so a plain click never looks like a Ctrl+click.
+        if (hovered || doc || selected || tint is not null)
             dl.AddRectFilled(pos - new Vector2(pad, pad * 0.5f), pos + new Vector2(width, lineH + pad * 0.5f),
-                Theme.ToU32(open || selected ? Theme.Sel : hovered || doc ? Theme.P.Raised : tint!.Value), 6f * D);
+                Theme.ToU32(selected ? Theme.Sel : hovered || doc ? Theme.P.Raised : tint!.Value), 6f * D);
         var badgeW = 0f;
         if (mark != PacketMark.None)
         {

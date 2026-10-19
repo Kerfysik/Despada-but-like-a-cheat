@@ -11,5 +11,4 @@ internal static partial class Engine
     public static readonly TypeRef   GameController   = Type("Robust.Client.GameController");
     public static readonly MethodRef GameUpdate       = Method(GameController, "Update", "FrameEventArgs");
     public static readonly MethodRef GameCleanup      = Method(GameController, "CleanupGameThread");
-    public static readonly MethodRef GameTextEntered  = Method(GameController, "TextEntered", "TextEnteredEventArgs");
 }

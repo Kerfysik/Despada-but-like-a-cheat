@@ -40,20 +40,14 @@ public static class MarseyEntry
         // Find everything first, then hook; each step only disables what depends on a missing piece.
         Engine.ResolveAll();
         Lifecycle.Install();
-        // No render hook, no overlay: the input hooks would only eat the toggle key and queue
-        // events nothing ever drains.
-        if (ClydeRenderHook.Install())
-        {
-            ImGuiInputHook.Install();
-            ImGuiSdl3TextInputStopPatch.Install();
-        }
+        if (ClydeRenderHook.Install()) ImGuiInputHook.Install();
         else ImGuiRenderer.Disable("render hook not installed");
         Features.Initialize();
 
         Sedition.Hide();
         Sedition.Apply(new Sedition.Manifest
         {
-            StackNames = { "Despada" },
+            StackNames = { "Despada", "ImGuiNET.ImGui", "ImGui.NET" },
         });
     }
 

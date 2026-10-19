@@ -4,16 +4,25 @@
 
 using System.Collections.Concurrent;
 using System.Numerics;
-using System.Reflection;
 using Despada.Config;
 using Despada.Core;
 using Despada.ImGui.UserInterface;
-using HarmonyLib;
 using ImGuiNET;
 
 namespace Despada.ImGui.Hook;
 
-public static class ImGuiInputHook
+/// <summary>
+/// Input for the overlay, taken from the window library itself, below the engine: an event filter
+/// on SDL3, or callbacks in front of the engine's on GLFW, whichever the engine's window runs on.
+/// What the overlay takes never reaches the engine; everything else passes untouched. No engine
+/// method is patched for input, so a key the content "presses" through the input manager is none
+/// of our business, and no fork's input code can get between us and the keyboard.
+///
+/// The backends (<see cref="SdlInput"/>, <see cref="GlfwInput"/>) only translate their events and
+/// call the policy here. It runs on the window library's thread, which is the engine's window
+/// thread by default: only volatile reads, writes into the queue, and posts to the game thread.
+/// </summary>
+public static unsafe class ImGuiInputHook
 {
     private static readonly ConcurrentQueue<Action<ImGuiIOPtr>> _ioQueue = new();
 
@@ -32,13 +41,10 @@ public static class ImGuiInputHook
     private static bool _claimNext;
     private static bool _claimed;
     // Keyed by (int)ImGuiKey, a byte of Mod bits: no ImGui.NET value type in a field (type load).
+    // A published table is never written to again: the input thread reads it.
     private static Dictionary<int, byte> _wantNext = new();
     private static volatile Dictionary<int, byte> _want = new();
 
-    /// <summary>
-    /// Keeps keys from the game, as an active text field does: right away (the next input batch,
-    /// which runs before the next render) and as long as it is claimed every frame.
-    /// </summary>
     public static void ClaimKeyboard()
     {
         _claimNext = true;
@@ -69,9 +75,10 @@ public static class ImGuiInputHook
           or >= ImGuiKey.Apostrophe and <= ImGuiKey.GraveAccent or ImGuiKey.Space
           or >= ImGuiKey.Keypad0 and <= ImGuiKey.KeypadEqual;
 
-    public static void FlushEvents()
+    /// <summary>Hands the queued input to ImGui; hidden (the caller's one read of the flag for the frame), the queue is just emptied.</summary>
+    public static void FlushEvents(bool visible)
     {
-        if (!ImGuiRenderer.OverlayVisible)
+        if (!visible)
         {
             while (_ioQueue.TryDequeue(out _)) { }
             return;
@@ -84,23 +91,22 @@ public static class ImGuiInputHook
     public static void Reset()
     {
         while (_ioQueue.TryDequeue(out _)) { }
-        _gameHeld.Clear();
+        lock (_gameHeld) _gameHeld.Clear();
         _claimNext = _claimed = false;
-        _wantNext.Clear();
+        _wantNext = new Dictionary<int, byte>();
         _want = new Dictionary<int, byte>();
         WantCaptureMouse    = false;
         WantCaptureKeyboard = false;
         WantTextInput       = false;
     }
 
-    public static void SnapshotWantCapture()
+    public static void SnapshotWantCapture(bool visible)
     {
-        _claimed   = _claimNext && ImGuiRenderer.OverlayVisible;
+        _claimed   = _claimNext && visible;
         _claimNext = false;
-        // Publish this frame's declarations; the input batch reads _want, Draw fills _wantNext.
-        (_want, _wantNext) = (_wantNext, _want);
-        _wantNext.Clear();
-        if (!ImGuiRenderer.OverlayVisible)
+        _want = _wantNext;
+        _wantNext = new Dictionary<int, byte>();
+        if (!visible)
         {
             WantCaptureMouse = false;
             WantCaptureKeyboard = false;
@@ -116,170 +122,232 @@ public static class ImGuiInputHook
         WantCaptureKeyboard = io.WantTextInput || _claimed;
     }
 
-    /// <summary>One prefix on every input entry point; a missing one only loses that kind of input.</summary>
-    public static void Install()
+    /// <summary>The overlay just opened: ImGui gets the pointer where it is, not where it last was while shown.</summary>
+    public static void OnShown()
     {
-        // Without its input hooks the overlay can be neither used nor closed: give everything back
-        // to the game for the rest of the session.
-        Hooks.Tripped += (owner, reason) =>
-        {
-            if (owner == "input") ImGuiRenderer.Disable($"input hooks shut off: {reason}");
-        };
-
-        // Keys down without keys up (or buttons without releases) would leave ImGui holding them
-        // for good: those three hooks are one set, all or none. Wheel and text only lose their kind.
-        var required = new[] { Engine.InputKeyDown, Engine.InputKeyUp, Engine.UiMouseMove };
-        var ok = true;
-        foreach (var target in required) ok &= Hooks.Prefix("input", target, nameof(Prefix), typeof(ImGuiInputHook));
-        if (!ok)
-        {
-            Hooks.RemoveAll("input");
-            ImGuiRenderer.Disable("input hooks incomplete");
-            return;
-        }
-        foreach (var target in new[] { Engine.UiMouseWheel, Engine.GameTextEntered })
-            Hooks.Prefix("input", target, nameof(Prefix), typeof(ImGuiInputHook));
+        if (_lastMouse is { } p) _ioQueue.Enqueue(io => io.AddMousePosEvent(p.X, p.Y));
     }
 
-    private static bool Prefix(MethodBase __originalMethod, object[] __args)
+    // ── which backend ────────────────────────────────────────────────────────────────────────
+
+    private static bool _gaveUp;
+    private static string? _lastWhy;
+    private static int _faults;
+    private static long _nextTry;   // a failed look for the library is repeated once a second, not every frame
+
+    public static bool Installed => SdlInput.Installed || GlfwInput.Installed;
+
+    /// <summary>
+    /// Puts the backend on the engine's window library, by the kind of its windowing. Called at
+    /// start and again each frame until the window exists and the library is bound.
+    /// </summary>
+    public static void Install()
+    {
+        if (Installed || _gaveUp || SdlInput.Asked || GlfwInput.Asked) return;
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (now < _nextTry) return;
+        _nextTry = now + System.Diagnostics.Stopwatch.Frequency;
+        var kind = WindowingKind();
+        string? why;
+        if (kind is null) why = "the engine has no window yet";
+        else if (kind.Contains("Sdl3", StringComparison.Ordinal)) { if (SdlInput.Install(out why)) return; }
+        else if (kind.Contains("Glfw", StringComparison.Ordinal)) { if (GlfwInput.Install(out why)) return; }
+        else { _gaveUp = true; ImGuiRenderer.Disable($"input: unknown windowing {kind}"); return; }
+        if (why is null) return;
+        if (SdlInput.GaveUp || GlfwInput.GaveUp) { _gaveUp = true; ImGuiRenderer.Disable($"input: {why}"); return; }
+        if (why != _lastWhy) { _lastWhy = why; MarseyLogger.Info($"[ImGuiInputHook] waiting: {why}"); }
+    }
+
+    /// <summary>The type name of Clyde's windowing implementation ("…Sdl3WindowingImpl", "…GlfwWindowingImpl"); null before it exists.</summary>
+    internal static string? WindowingKind() => Windowing()?.GetType().Name;
+
+    internal static object? Windowing()
     {
         try
         {
-            return __originalMethod.Name switch
+            var clyde = Engine.ClydeManager.Instance;
+            if (clyde is null) return null;
+            for (var t = clyde.GetType(); t is not null; t = t.BaseType)
+                if (HarmonyLib.AccessTools.Field(t, "_windowing")?.GetValue(clyde) is { } w) return w;
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>Clyde's main window registration (a Sdl3WindowReg / GlfwWindowReg), or null.</summary>
+    internal static object? MainWindowReg()
+    {
+        try
+        {
+            var clyde = Engine.ClydeManager.Instance;
+            if (clyde is null) return null;
+            for (var t = clyde.GetType(); t is not null; t = t.BaseType)
+                if (HarmonyLib.AccessTools.Field(t, "_mainWindow")?.GetValue(clyde) is { } w) return w;
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>A native pointer field of the registration (SDL_Window*, GLFWwindow*), whatever shape reflection gives it.</summary>
+    internal static nint PointerField(object reg, string name)
+    {
+        try
+        {
+            var v = HarmonyLib.AccessTools.Field(reg.GetType(), name)?.GetValue(reg);
+            return v switch
             {
-                "KeyDown" => OnKeyDown(__args[0]),
-                "KeyUp" => OnKeyUp(__args[0]),
-                "MouseMove" => OnMouseMove(__args[0]),
-                "MouseWheel" => OnMouseWheel(__args[0]),
-                "TextEntered" => OnTextEntered(__args[0]),
-                _ => true
+                nint p => p,
+                System.Reflection.Pointer ptr => (nint)System.Reflection.Pointer.Unbox(ptr),
+                _ => 0,
             };
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>
+    /// Runs work on the engine's window thread (Clyde._windowing.RunOnWindowThread; inline when the
+    /// engine has none). The window libraries' own calls belong there: setting SDL's filter takes a
+    /// lock the engine's event watch holds while it waits for the game thread, and GLFW's calls
+    /// are main-thread only.
+    /// </summary>
+    internal static bool RunOnEngineWindowThread(Action work)
+    {
+        try
+        {
+            var windowing = Windowing();
+            if (windowing is null) return false;
+            var m = HarmonyLib.AccessTools.Method(windowing.GetType(), "RunOnWindowThread", [typeof(Action)]);
+            if (m is null) return false;
+            m.Invoke(windowing, [work]);
+            return true;
         }
         catch (Exception ex)
         {
-            // Repeated failures remove the input hooks (game input works as without Despada).
-            Hooks.Fail("input", __originalMethod.Name, ex);
-            return true;
+            MarseyLogger.Warn($"[ImGuiInputHook] RunOnWindowThread: {ex.Message}");
+            return false;
         }
     }
 
-    // Keys/buttons whose key-down went to the game: the matching key-up must go there too,
-    // even if the overlay opened or ImGui grabbed focus in between.
-    private static readonly HashSet<byte> _gameHeld = new();
+    /// <summary>A backend's handler threw: logged; after three, the backend goes and the overlay with it.</summary>
+    internal static void Fault(Exception ex)
+    {
+        try
+        {
+            if (++_faults <= 3) MarseyLogger.Warn($"[ImGuiInputHook] {ex}");
+            if (_faults == 3) Lifecycle.Post(() =>
+            {
+                SdlInput.Uninstall();
+                GlfwInput.Uninstall();
+                _gaveUp = true;
+                ImGuiRenderer.Disable("input: 3 failures");
+            });
+        }
+        catch { }
+    }
 
-    private static string? _toggleKeyName;
-    private static byte    _toggleKey;
+    // ── the policy, backend-neutral ──────────────────────────────────────────────────────────
 
-    // Resolved by name from the config: the engine's Keyboard.Key values shift whenever a key is inserted.
-    private static byte ToggleKey
+    // Keys and buttons whose press went to the game: the matching release must go there too,
+    // even if the overlay opened or ImGui grabbed focus in between. Keys by their physical id
+    // (the backend's scancode: a keycode can change under a held key when the layout does);
+    // buttons tagged apart.
+    private static readonly HashSet<uint> _gameHeld = new();
+    private const uint ButtonTag = 0x8000_0000u;
+
+    internal const int ModCtrl = 1, ModShift = 2, ModAlt = 4, ModSuper = 8, ModAltGr = 16;
+
+    private static string? _toggleName;
+    private static int     _toggle = (int)ImGuiKey.Delete;   // an int: no ImGui.NET value type in a field (type load)
+
+    // Resolved by name from the config; an unknown or unbindable name falls back to Delete.
+    private static ImGuiKey ToggleKey
     {
         get
         {
             var name = DespadaConfig.Current.ToggleKey;
-            if (name != _toggleKeyName)
+            if (name != _toggleName)
             {
-                _toggleKey     = ResolveKey(name);
-                _toggleKeyName = name;
+                _toggleName = name;
+                var k = InputKeys.ByName(name);
+                _toggle = (int)(k ?? InputKeys.ByName(DespadaSettings.DefaultToggleKey)!.Value);
+                if (k is null) MarseyLogger.Warn($"[ImGuiInputHook] toggle key '{name}' is not bindable, using {DespadaSettings.DefaultToggleKey}.");
             }
-            return _toggleKey;
+            return (ImGuiKey)_toggle;
         }
     }
 
     // Settings "press a key" capture: the next non-repeat keyboard key goes here instead of anywhere
-    // else. Receives the Keyboard.Key name, or null when cancelled (Escape or CancelKeyCapture).
+    // else. Receives the key's name, or null when cancelled (Escape or CancelKeyCapture). The
+    // callback runs on the game thread.
     private static Action<string?>? _keyCapture;
 
     public static void BeginKeyCapture(Action<string?> onKey) => _keyCapture = onKey;
 
     public static void CancelKeyCapture()
     {
-        var onKey = _keyCapture;
-        _keyCapture = null;
+        var onKey = Interlocked.Exchange(ref _keyCapture, null);
         onKey?.Invoke(null);
     }
 
-    // The toggle key always wins over text input, so only keys that never type or edit text can be
-    // bound to it (letters, Enter, arrows, modifiers... would become unusable in text fields).
-    private static bool IsBindable(object key)
+    /// <summary>A key went down or up. True: the game gets it too.</summary>
+    internal static bool Key(ImGuiKey imKey, uint physical, int mods, bool down, bool repeat)
     {
-        var k = KeyMap.ToImGuiKey(key);
-        return k is >= ImGuiKey.F1 and <= ImGuiKey.F24
-            or ImGuiKey.Insert or ImGuiKey.Delete or ImGuiKey.PageUp or ImGuiKey.PageDown
-            or ImGuiKey.Pause or ImGuiKey.ScrollLock or ImGuiKey.PrintScreen;
-    }
-
-    private static byte ResolveKey(string name)
-    {
-        var keyType = Engine.KeyboardKey.Type;
-        if (keyType is not null && Enum.TryParse(keyType, name, out var value))
-            return Convert.ToByte(value);
-
-        const string fallbackName = DespadaSettings.DefaultToggleKey;
-        if (keyType is not null && name != fallbackName && Enum.TryParse(keyType, fallbackName, out var fallback))
+        bool ctrl = (mods & ModCtrl) != 0, shift = (mods & ModShift) != 0, alt = (mods & ModAlt) != 0,
+             super = (mods & ModSuper) != 0, altGr = (mods & ModAltGr) != 0;
+        // A modifier key speaks for its own modifier: the event's mods field is the state before
+        // the key changed (GLFW reports Shift still set on Shift's release and clear on its press),
+        // and ImGui would hold the modifier until the next key event says otherwise. Both sides
+        // are kept apart, so letting go of one Shift while the other is held keeps Shift.
+        var side = ModBit(imKey);
+        if (side != 0)
         {
-            MarseyLogger.Warn($"[ImGuiInputHook] Keyboard.Key.{name} not found, using {fallbackName}.");
-            return Convert.ToByte(fallback);
+            _modKeys = down ? _modKeys | side : _modKeys & ~side;
+            shift = (_modKeys & 0x03) != 0; ctrl = (_modKeys & 0x0C) != 0; alt = (_modKeys & 0x30) != 0; super = (_modKeys & 0xC0) != 0;
         }
 
-        // Keyboard.Key.Delete at the time of writing (see KeyMap); only hit if the enum can't be found.
-        MarseyLogger.Warn($"[ImGuiInputHook] Keyboard.Key.{name} not found, falling back to 83.");
-        return 83;
-    }
-
-    private static bool OnKeyDown(object args)
-    {
-        var key = Read(args, "Key");
-        if (key is null) return true;
-
-        var keyByte = Convert.ToByte(key);
-
-        if (_keyCapture is not null && ImGuiRenderer.OverlayVisible && !KeyMap.IsMouseKey(key))
+        if (!down)
         {
-            if (Read(args, "IsRepeat") is true) return false;
-            var name = Enum.GetName(key.GetType(), key);
-            if (name == "Escape")
-            {
-                CancelKeyCapture();
-                return false;
-            }
-            if (name is null || !IsBindable(key))
-                return false; // swallowed, still waiting
+            // The chord's text event (if the library sends one at all) comes before the key-up.
+            _suppressText = false;
+            // A key the game saw go down: its release goes there whatever it is now (even the toggle).
+            bool held;
+            lock (_gameHeld) held = _gameHeld.Remove(physical);
+            if (imKey == ToggleKey && !held) return false;
+            if (ImGuiRenderer.OverlayVisible) EnqueueKey(imKey, ctrl, shift, alt, super, false);
+            return held || !ImGuiRenderer.OverlayVisible;
+        }
 
-            var onKey = _keyCapture;
-            _keyCapture = null;
-            onKey(name);
+        if (_keyCapture is not null && ImGuiRenderer.OverlayVisible)
+        {
+            if (repeat) return false;
+            var name = imKey == ImGuiKey.Escape ? null : InputKeys.NameOf(imKey);
+            if (imKey != ImGuiKey.Escape && name is null) return false;   // swallowed, still waiting
+            if (Interlocked.Exchange(ref _keyCapture, null) is { } capture) Lifecycle.Post(() => capture(name));
             return false;
         }
 
-        if (keyByte == ToggleKey)
+        if (imKey == ToggleKey)
         {
-            if (ImGuiRenderer.Failed) return true;
-
-            if (Read(args, "IsRepeat") is not true)
+            if (!repeat)
             {
                 ImGuiRenderer.OverlayVisible = !ImGuiRenderer.OverlayVisible;
                 MarseyLogger.Info($"[ImGuiInputHook] Overlay → {ImGuiRenderer.OverlayVisible}");
             }
-            // The toggle key belongs to the overlay: neither the game nor ImGui sees it.
-            return false;
+            return false;   // the toggle key belongs to the overlay: neither the game nor ImGui sees it
         }
 
         if (!ImGuiRenderer.OverlayVisible)
         {
-            _gameHeld.Add(keyByte);
+            lock (_gameHeld) _gameHeld.Add(physical);   // its release goes to the game even if the overlay opens meanwhile
             return true;
         }
 
-        var imKey = KeyMap.IsMouseKey(key) ? ImGuiKey.None : KeyMap.ToImGuiKey(key);
-
-        // A paste is coming (Ctrl+V / Ctrl+Shift+V): fetch the system clipboard now.
-        if (imKey == ImGuiKey.LeftCtrl && WantTextInput) Clipboard.Refresh();
+        // A paste is coming (Ctrl+V / Ctrl+Shift+V): fetch the system clipboard now (on the game thread).
+        if (imKey == ImGuiKey.LeftCtrl && WantTextInput) Lifecycle.Post(Clipboard.Refresh);
 
         // Alt+key chords (session/tab keys, Alt+B/F/D): the character must not be typed too, in the
-        // console or any other field that owns the keyboard.
-        // AltGr (291: KeyEventArgs.AltGr; null on older engines) types characters on many layouts.
-        if (WantCaptureKeyboard && IsAltChordKey(imKey) && Read(args, "AltGr") is not true
-            && Convert.ToBoolean(Read(args, "Alt") ?? false) && !Convert.ToBoolean(Read(args, "Control") ?? false))
+        // console or any other field that owns the keyboard. AltGr types characters on many layouts.
+        if (WantCaptureKeyboard && IsAltChordKey(imKey) && alt && !ctrl && !altGr)
             _suppressText = true;
 
         // Esc in the console only closes its suggestion list: ImGui would deactivate the field and
@@ -290,110 +358,98 @@ public static class ImGuiInputHook
             return false;
         }
 
-        // ImGui always sees the event so its state stays consistent; the game gets it
-        // unless ImGui wants this kind of input: hovered window, active text field, a claim, or
-        // a key the shown panel declared (Want).
-        var isMouse = EnqueueKey(args, key, down: true);
-        if (isMouse ? WantCaptureMouse : WantCaptureKeyboard)
-            return false;
-        if (!isMouse)
+        // ImGui always sees the event so its state stays consistent; the game gets it unless
+        // ImGui wants this kind of input: an active text field, a claim, or a key the shown
+        // panel declared (Want). A modifier pressed with the pointer over the overlay belongs
+        // to it too: it is about to modify a click there, not the game.
+        EnqueueKey(imKey, ctrl, shift, alt, super, true);
+        if (WantCaptureKeyboard) return false;
+        if (WantCaptureMouse && IsModifier(imKey)) return false;
+        if (Wants(imKey, ctrl, shift, alt))
         {
-            var ctrl  = Convert.ToBoolean(Read(args, "Control") ?? false);
-            var shift = Convert.ToBoolean(Read(args, "Shift") ?? false);
-            var alt   = Convert.ToBoolean(Read(args, "Alt") ?? false);
-            if (Wants(imKey, ctrl, shift, alt))
-            {
-                if (!ctrl && ProducesText(imKey)) _suppressText = true;
-                return false;
-            }
+            if (!ctrl && ProducesText(imKey)) _suppressText = true;
+            return false;
         }
 
-        _gameHeld.Add(keyByte);
+        lock (_gameHeld) _gameHeld.Add(physical);
         return true;
     }
 
-    private static bool OnKeyUp(object args)
+    private static bool IsModifier(ImGuiKey k) => ModBit(k) != 0;
+
+    // Which modifier keys are down, one bit per key (input thread only).
+    private static int _modKeys;
+
+    private static int ModBit(ImGuiKey k) => k switch
     {
-        var key = Read(args, "Key");
-        if (key is null) return true;
+        ImGuiKey.LeftShift => 0x01, ImGuiKey.RightShift => 0x02, ImGuiKey.LeftCtrl  => 0x04, ImGuiKey.RightCtrl  => 0x08,
+        ImGuiKey.LeftAlt   => 0x10, ImGuiKey.RightAlt   => 0x20, ImGuiKey.LeftSuper => 0x40, ImGuiKey.RightSuper => 0x80,
+        _ => 0,
+    };
 
-        var keyByte = Convert.ToByte(key);
-
-        // The chord's text event (if SDL sends one at all) comes before the key-up.
-        _suppressText = false;
-
-        if (keyByte == ToggleKey && !ImGuiRenderer.Failed)
-            return false;
-
-        if (ImGuiRenderer.OverlayVisible)
-            EnqueueKey(args, key, down: false);
-
-        if (_gameHeld.Remove(keyByte))
-            return true;
-
-        return !ImGuiRenderer.OverlayVisible;
-    }
-
-    // Queues the key/button for ImGui. Returns true if it is a mouse button.
-    private static bool EnqueueKey(object args, object key, bool down)
+    private static void EnqueueKey(ImGuiKey imKey, bool ctrl, bool shift, bool alt, bool super, bool down)
     {
-        if (KeyMap.IsMouseKey(key))
-        {
-            var btnIdx = KeyMap.MouseKeyToImGuiButton(key);
-            if (btnIdx >= 0)
-                _ioQueue.Enqueue(io => io.AddMouseButtonEvent(btnIdx, down));
-            return true;
-        }
-
         // Kept as int: a closure field of ImGui.NET's enum type would make this compiler-generated
         // class need ImGui.NET at type-load time (Assembly.GetTypes() before our resolver exists).
-        var imKey = (int)KeyMap.ToImGuiKey(key);
-        var ctrl  = Convert.ToBoolean(Read(args, "Control") ?? false);
-        var shift = Convert.ToBoolean(Read(args, "Shift") ?? false);
-        var alt   = Convert.ToBoolean(Read(args, "Alt") ?? false);
-        var super = Convert.ToBoolean(Read(args, "System") ?? false);
-
+        var k = (int)imKey;
         _ioQueue.Enqueue(io =>
         {
             io.AddKeyEvent(ImGuiKey.ModCtrl, ctrl);
             io.AddKeyEvent(ImGuiKey.ModShift, shift);
             io.AddKeyEvent(ImGuiKey.ModAlt, alt);
             io.AddKeyEvent(ImGuiKey.ModSuper, super);
-            if (imKey != (int)ImGuiKey.None)
-                io.AddKeyEvent((ImGuiKey)imKey, down);
+            if (k != (int)ImGuiKey.None) io.AddKeyEvent((ImGuiKey)k, down);
         });
-        return false;
     }
 
-    private static bool OnMouseMove(object args)
+    /// <summary>A mouse button; <paramref name="imGuiIndex"/> is ImGui's (0 left, 1 right, 2 middle, 3, 4) or -1. True: the game gets it too.</summary>
+    internal static bool Button(int imGuiIndex, byte which, bool down)
     {
-        if (!ImGuiRenderer.OverlayVisible) return true;
-
-        var screenCoords = Read(args, "Position");
-        Vector2 pos = default;
-
-        if (screenCoords is not null)
+        var tag = ButtonTag | which;
+        if (down)
         {
-            var innerPos = Read(screenCoords, "Position");
-            if (innerPos is Vector2 v) pos = v;
+            if (!ImGuiRenderer.OverlayVisible)
+            {
+                lock (_gameHeld) _gameHeld.Add(tag);
+                return true;
+            }
+            if (imGuiIndex >= 0) _ioQueue.Enqueue(io => io.AddMouseButtonEvent(imGuiIndex, true));
+            if (WantCaptureMouse) return false;
+            lock (_gameHeld) _gameHeld.Add(tag);
+            return true;
         }
+        if (ImGuiRenderer.OverlayVisible && imGuiIndex >= 0) _ioQueue.Enqueue(io => io.AddMouseButtonEvent(imGuiIndex, false));
+        bool held;
+        lock (_gameHeld) held = _gameHeld.Remove(tag);
+        return held || !ImGuiRenderer.OverlayVisible;
+    }
 
-        var virtualPos = pos / UiScale.K;
-        _ioQueue.Enqueue(io => io.AddMousePosEvent(virtualPos.X, virtualPos.Y));
+    private static Vector2? _lastMouse;
+
+    /// <summary>
+    /// The pointer, in framebuffer pixels. Motion always goes on to the game as well: the engine's
+    /// own pointer position (aim, facing) must keep following the mouse while it crosses a panel;
+    /// what the game may not have is the clicks and the wheel.
+    /// </summary>
+    internal static void Move(float px, float py)
+    {
+        var pos = new Vector2(px, py) / UiScale.K;
+        _lastMouse = pos;
+        if (ImGuiRenderer.OverlayVisible) _ioQueue.Enqueue(io => io.AddMousePosEvent(pos.X, pos.Y));
+    }
+
+    /// <summary>The wheel, in ImGui's convention (x positive scrolls left, y positive up). True: the game gets it too.</summary>
+    internal static bool Wheel(float x, float y)
+    {
+        if (!ImGuiRenderer.OverlayVisible) return true;
+        _ioQueue.Enqueue(io => io.AddMouseWheelEvent(x, y));
         return !WantCaptureMouse;
     }
 
-    private static bool OnMouseWheel(object args)
+    internal static void Focus(bool gained)
     {
-        if (!ImGuiRenderer.OverlayVisible) return true;
-
-        var delta = Read(args, "Delta");
-        Vector2 d = default;
-        if (delta is Vector2 v) d = v;
-
-        _ioQueue.Enqueue(io => io.AddMouseWheelEvent(d.X, d.Y));
-
-        return !WantCaptureMouse;
+        if (!gained) _modKeys = 0;   // the libraries release every key on focus loss; so do we
+        if (ImGuiRenderer.OverlayVisible) _ioQueue.Enqueue(io => io.AddFocusEvent(gained));
     }
 
     // Set by an Alt chord key-down; drops the one text event that key produces. One-shot rather than
@@ -405,7 +461,8 @@ public static class ImGuiInputHook
           or ImGuiKey.LeftBracket or ImGuiKey.RightBracket
           or >= ImGuiKey._1 and <= ImGuiKey._9;
 
-    private static bool OnTextEntered(object args)
+    /// <summary>Text typed. True: the game gets it too.</summary>
+    internal static bool Text(string? text)
     {
         if (!ImGuiRenderer.OverlayVisible) return true;
         if (_suppressText)
@@ -413,50 +470,14 @@ public static class ImGuiInputHook
             _suppressText = false;
             return false;
         }
-
-        var textObj = Read(args, "Text");
-
-        string? captured = null;
-
-        if (textObj is string s)
-            captured = s;
-        else if (textObj is char c)
-            captured = c.ToString();
-
-        if (string.IsNullOrEmpty(captured)) return !WantCaptureKeyboard;
-
-        var cap = captured;
+        if (string.IsNullOrEmpty(text)) return !WantCaptureKeyboard;
+        var cap = text;
         _ioQueue.Enqueue(io =>
         {
             foreach (var rune in cap.EnumerateRunes())
                 io.AddInputCharacter((uint)rune.Value);
         });
-
         return !WantCaptureKeyboard;
-    }
-
-    private static readonly ConcurrentDictionary<(Type, string), FieldInfo?> _fieldCache = new();
-    private static readonly ConcurrentDictionary<(Type, string), PropertyInfo?> _propCache = new();
-
-    private static object? Read(object obj, string name)
-        => ReadProperty(obj, name) ?? ReadField(obj, name);
-
-    private static object? ReadField(object obj, string name)
-    {
-        var type = obj.GetType();
-        var fi = _fieldCache.GetOrAdd((type, name), k =>
-            k.Item1.GetField(k.Item2,
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
-        return fi?.GetValue(obj);
-    }
-
-    private static object? ReadProperty(object obj, string name)
-    {
-        var type = obj.GetType();
-        var pi = _propCache.GetOrAdd((type, name), k =>
-            k.Item1.GetProperty(k.Item2,
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
-        return pi?.GetValue(obj);
     }
 }
 
@@ -476,28 +497,4 @@ public enum Mod : byte
     ShiftAlt     = 1 << 6,
     CtrlShiftAlt = 1 << 7,
     Any          = 0xFF
-}
-
-public static class ImGuiSdl3TextInputStopPatch
-{
-    private static bool _loggedBlock;
-
-    public static void Install()
-        => Hooks.Prefix("input", Engine.Sdl3TextInputStop, nameof(Prefix), typeof(ImGuiSdl3TextInputStopPatch));
-
-    private static bool Prefix()
-    {
-        // Only for a real text field: a panel's keyboard claim needs no SDL text input.
-        if (ImGuiRenderer.OverlayVisible && ImGuiInputHook.WantTextInput)
-        {
-            if (!_loggedBlock)
-            {
-                _loggedBlock = true;
-                MarseyLogger.Info("[ImGuiSdl3TextInputStopPatch] Blocking TextInputStop — ImGui has focus.");
-            }
-            return false;
-        }
-        _loggedBlock = false;
-        return true;
-    }
 }
