@@ -7,7 +7,7 @@ using HarmonyLib;
 public static class SubverterPatch
 {
     public static string Name = "Despada";
-    public static string Description = "Active analytics patch || version 0.0.2";
+    public static string Description = "Active analytics patch || version 0.0.3";
     public static string IconResource = "Despada.Assets.icon.png";
     public static Harmony Harm = new("Despada");
 }
