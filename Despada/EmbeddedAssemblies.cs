@@ -12,6 +12,10 @@ internal static class EmbeddedAssemblies
 {
     private const string Prefix = "Despada.Deps.";
 
+    // Our own assembly, taken once before Sedition.Hide(): after it the loader's RuntimeType.Assembly
+    // hook reports Robust.Client for our types, so typeof(X).Assembly must never be used for self-access.
+    internal static readonly Assembly Self = Assembly.GetExecutingAssembly();
+
     private static readonly Dictionary<string, Assembly> _loaded = new();
     private static bool _installed;
 
@@ -26,6 +30,13 @@ internal static class EmbeddedAssemblies
         AppDomain.CurrentDomain.AssemblyResolve += Resolve;
     }
 
+    // The assembly loaded from resources under this simple name, if any.
+    internal static Assembly? Loaded(string name)
+    {
+        lock (_loaded)
+            return _loaded.GetValueOrDefault(name);
+    }
+
     private static Assembly? Resolve(object? sender, ResolveEventArgs args)
     {
         var name = new AssemblyName(args.Name).Name;
@@ -36,7 +47,7 @@ internal static class EmbeddedAssemblies
             if (_loaded.TryGetValue(name, out var cached))
                 return cached;
 
-            using var stream = typeof(EmbeddedAssemblies).Assembly.GetManifestResourceStream($"{Prefix}{name}.dll");
+            using var stream = Self.GetManifestResourceStream($"{Prefix}{name}.dll");
             if (stream is null) return null;
 
             var bytes = new byte[stream.Length];

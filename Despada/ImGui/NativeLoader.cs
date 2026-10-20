@@ -34,8 +34,6 @@ internal static class NativeLoader
             return;
         }
 
-        var asm = typeof(NativeLoader).Assembly;
-
         string resourceSuffix, fileName;
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -62,7 +60,7 @@ internal static class NativeLoader
             return;
         }
 
-        var nativePath = ExtractResource(asm, resourceSuffix, fileName);
+        var nativePath = ExtractResource("Despada." + resourceSuffix, fileName);
         if (nativePath is null) return;
 
         try
@@ -77,15 +75,15 @@ internal static class NativeLoader
             return;
         }
 
-        TryRegisterForAssembly(typeof(ImGuiNET.ImGui).Assembly, _tempDir!);
+        TryRegisterForAssembly(EmbeddedAssemblies.Loaded("ImGui.NET") ?? typeof(ImGuiNET.ImGui).Assembly, _tempDir!);
     }
 
     // Extracts into a per-user cache dir named by content hash and reuses it across launches.
     // An existing file is only trusted if its hash still matches; writes go through a temp file
     // + rename so a half-written library is never loaded.
-    private static string? ExtractResource(Assembly asm, string resourceSuffix, string fileName)
+    private static string? ExtractResource(string resourceName, string fileName)
     {
-        var resourceName = $"{asm.GetName().Name}.{resourceSuffix}";
+        var asm = EmbeddedAssemblies.Self;
 
         byte[] data;
         using (var stream = asm.GetManifestResourceStream(resourceName))

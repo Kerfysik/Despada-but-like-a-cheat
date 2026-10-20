@@ -23,7 +23,7 @@ public static class MarseyLogger
     public static Forward? logDelegate;
 
     private static void Emit(string level, string message)
-        => logDelegate?.Invoke(Assembly.GetExecutingAssembly().GetName(), $"[{level}] {message}");
+        => logDelegate?.Invoke(EmbeddedAssemblies.Self.GetName(), $"[{level}] {message}");
 
     public static void Info(string message) => Emit("INFO", message);
     public static void Warn(string message) => Emit("WARN", message);

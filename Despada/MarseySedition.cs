@@ -28,7 +28,7 @@ public static class Sedition
     public static Action<string[], string[], string[], string[], string[], string[]>? hideManifestDelegate;
 
     /// <summary>Hide this assembly.</summary>
-    public static void Hide() => hideDelegate?.Invoke(Assembly.GetExecutingAssembly());
+    public static void Hide() => hideDelegate?.Invoke(EmbeddedAssemblies.Self);
 
     /// <summary>
     /// Local mirror of HideManifest — declarative description of what to hide from the anticheat.

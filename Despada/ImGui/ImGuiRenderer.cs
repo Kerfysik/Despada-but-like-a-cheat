@@ -4,7 +4,6 @@
 
 using System.Collections.Concurrent;
 using System.Numerics;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using Despada.Config;
 using Despada.Core;
@@ -440,8 +439,7 @@ public static class ImGuiRenderer
         const string resourceName = "Despada.Assets.JetBrainsMonoNerdFontMono-Regular.ttf";
         var fontSize = BodyPx(scale);
 
-        var asm = Assembly.GetExecutingAssembly();
-        using var stream = asm.GetManifestResourceStream(resourceName);
+        using var stream = EmbeddedAssemblies.Self.GetManifestResourceStream(resourceName);
         if (stream is null)
         {
             MarseyLogger.Warn($"[ImGuiRenderer] Font not found: '{resourceName}'");
@@ -495,7 +493,7 @@ public static class ImGuiRenderer
     {
         WordmarkFont = 0;
         const string resourceName = "Despada.Assets.JetBrainsMono-ExtraBold-Caps.ttf";
-        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName);
+        using var stream = EmbeddedAssemblies.Self.GetManifestResourceStream(resourceName);
         if (stream is null)
         {
             MarseyLogger.Warn($"[ImGuiRenderer] Font not found: '{resourceName}'");
