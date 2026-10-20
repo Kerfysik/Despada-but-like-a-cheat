@@ -45,6 +45,10 @@ public static class MarseyEntry
         Features.Initialize();
 
         Sedition.Hide();
+        // Our managed dep, not the patch itself: hand the loaded ImGui.NET to Hidesey
+        // explicitly. In the normal path it was already hidden at load time (see
+        // EmbeddedAssemblies), in which case this is a no-op.
+        Sedition.Hide(EmbeddedAssemblies.Loaded("ImGui.NET"));
         Sedition.Apply(new Sedition.Manifest
         {
             StackNames = { "Despada", "ImGuiNET.ImGui", "ImGui.NET" },

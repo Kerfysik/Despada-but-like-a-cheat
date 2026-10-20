@@ -31,6 +31,16 @@ public static class Sedition
     public static void Hide() => hideDelegate?.Invoke(EmbeddedAssemblies.Self);
 
     /// <summary>
+    /// Hide an assembly this mod loaded itself (the embedded deps, e.g. ImGui.NET). Hidesey only
+    /// sees what already exists in the process, so pass the real Assembly object, not a name.
+    /// </summary>
+    public static void Hide(Assembly? asm)
+    {
+        if (asm is null) return;
+        hideDelegate?.Invoke(asm);
+    }
+
+    /// <summary>
     /// Local mirror of HideManifest — declarative description of what to hide from the anticheat.
     /// All entries are STRINGS (FullName for type categories, registered name for cvars/commands)
     /// so they can be declared from Entry before the targets are loaded.

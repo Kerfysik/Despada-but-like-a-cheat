@@ -56,6 +56,12 @@ internal static class EmbeddedAssemblies
             var asm = Assembly.Load(bytes);
             _loaded[name] = asm;
             MarseyLogger.Info($"[EmbeddedAssemblies] Loaded {asm.FullName} from resources.");
+
+            // Hand the freshly loaded assembly to Hidesey right away: it can only hide what
+            // already exists in the process, so a dependency first touched on a later frame
+            // (not at entry) would otherwise stay visible until somebody hides it by hand.
+            // No-op when the loader didn't bind hideDelegate (standalone test runs).
+            Sedition.Hide(asm);
             return asm;
         }
     }
