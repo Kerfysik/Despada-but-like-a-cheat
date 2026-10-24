@@ -37,32 +37,39 @@ internal static class EmbeddedAssemblies
             return _loaded.GetValueOrDefault(name);
     }
 
+    /// <summary>
+    /// The embedded assembly, loaded now if it wasn't yet: the entry hides every dependency right
+    /// after this, on the main thread, so nothing is left to the moment the runtime first asks for
+    /// it. Null when there is no such resource.
+    /// </summary>
+    internal static Assembly? Ensure(string name)
+    {
+        lock (_loaded) return Load(name);
+    }
+
+    // The resolver only resolves: it runs inside the runtime's loader, on whatever thread first
+    // touches the type, under its locks. Hiding is the entry's job (Ensure + Sedition.Hide).
     private static Assembly? Resolve(object? sender, ResolveEventArgs args)
     {
         var name = new AssemblyName(args.Name).Name;
         if (name is null) return null;
+        lock (_loaded) return Load(name);
+    }
 
-        lock (_loaded)
-        {
-            if (_loaded.TryGetValue(name, out var cached))
-                return cached;
+    private static Assembly? Load(string name)
+    {
+        if (_loaded.TryGetValue(name, out var cached))
+            return cached;
 
-            using var stream = Self.GetManifestResourceStream($"{Prefix}{name}.dll");
-            if (stream is null) return null;
+        using var stream = Self.GetManifestResourceStream($"{Prefix}{name}.dll");
+        if (stream is null) return null;
 
-            var bytes = new byte[stream.Length];
-            stream.ReadExactly(bytes);
+        var bytes = new byte[stream.Length];
+        stream.ReadExactly(bytes);
 
-            var asm = Assembly.Load(bytes);
-            _loaded[name] = asm;
-            MarseyLogger.Info($"[EmbeddedAssemblies] Loaded {asm.FullName} from resources.");
-
-            // Hand the freshly loaded assembly to Hidesey right away: it can only hide what
-            // already exists in the process, so a dependency first touched on a later frame
-            // (not at entry) would otherwise stay visible until somebody hides it by hand.
-            // No-op when the loader didn't bind hideDelegate (standalone test runs).
-            Sedition.Hide(asm);
-            return asm;
-        }
+        var asm = Assembly.Load(bytes);
+        _loaded[name] = asm;
+        MarseyLogger.Info($"[EmbeddedAssemblies] Loaded {asm.FullName} from resources.");
+        return asm;
     }
 }

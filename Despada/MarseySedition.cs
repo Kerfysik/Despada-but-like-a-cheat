@@ -18,7 +18,7 @@ using System.Reflection;
 /// </summary>
 public static class Sedition
 {
-    /// <summary>Hides the calling assembly from the anticheat (reflection/VFS/stack channels).</summary>
+    /// <summary>Hides the calling assembly from the telemetry (reflection/VFS/stack channels).</summary>
     public static Action<Assembly>? hideDelegate;
 
     /// <summary>
@@ -41,7 +41,7 @@ public static class Sedition
     }
 
     /// <summary>
-    /// Local mirror of HideManifest — declarative description of what to hide from the anticheat.
+    /// Local mirror of HideManifest — declarative description of what to hide from the telemetry.
     /// All entries are STRINGS (FullName for type categories, registered name for cvars/commands)
     /// so they can be declared from Entry before the targets are loaded.
     ///
