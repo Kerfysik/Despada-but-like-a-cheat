@@ -7,6 +7,7 @@ using Despada.Config;
 using Despada.Core;
 using Despada.ImGui;
 using Despada.ImGui.Hook;
+using Despada.Modules.Protect;
 
 public static class MarseyEntry
 {
@@ -40,6 +41,10 @@ public static class MarseyEntry
         // Find everything first, then hook; each step only disables what depends on a missing piece.
         Engine.ResolveAll();
         Lifecycle.Install();
+
+        // Always, whichever feature is on: a screenshot the client takes never gets Despada in it.
+        ScreenshotGuard.Install();
+
         if (ClydeRenderHook.Install()) ImGuiInputHook.Install();
         else ImGuiRenderer.Disable("render hook not installed");
         Features.Initialize();

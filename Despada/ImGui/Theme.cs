@@ -37,25 +37,25 @@ public static class Theme
 {
     public static readonly Palette Dark = new()
     {
-        Glass   = Rgb(0x161B2B),
+        Glass   = Rgb(0x10131C),
         Deep    = HexA(0x000000, 0.16f),
-        Raised  = HexA(0x2A3447, 0.70f),
-        Pop     = HexA(0x1A1F2E, 0.99f),
-        Line    = Hex(0x3A4665),
+        Raised  = HexA(0x242C3C, 0.70f),
+        Pop     = HexA(0x141821, 0.99f),
+        Line    = Hex(0x33405C),
         Sep     = HexA(0x6E738D, 0.45f),
         Fg      = Hex(0xCAD3F5),
         Sub     = Hex(0xA5ADCB),
         Muted   = Hex(0x8087A2),
-        Accent  = Hex(0x8AADF4),
-        Accent2 = Hex(0xC6A0F6),
-        Link    = Hex(0x91D7E3),
+        Accent  = Hex(0x5B8CFF),
+        Accent2 = Hex(0x9A7BF0),
+        Link    = Hex(0x6FB8E8),
         Green   = Hex(0xA6DA95),
         Yellow  = Hex(0xEED49F),
         Red     = Hex(0xED8796),
         Shadow  = HexA(0x000000, 0.45f),
-        Surface0 = Hex(0x363A4F),
-        Surface1 = Hex(0x494D64),
-        Surface2 = Hex(0x5B6078),
+        Surface0 = Hex(0x2E3448),
+        Surface1 = Hex(0x3D4459),
+        Surface2 = Hex(0x4E566E),
     };
 
     public static readonly Palette Light = new()
@@ -91,8 +91,10 @@ public static class Theme
     // Metrics are written as 1080p pixels and converted to logical units (see UiScale).
     private const float D = UiScale.DesignHeight / 1080f;
 
-    public const float WindowRounding = 18f * D;
-    public const float SmallRounding  = 10f * D;
+    // A step toward Cerberus' plain-ImGui menu: tighter corners than the old 18/10 px, still
+    // softer than stock ImGui so it stays Despada's own window.
+    public const float WindowRounding = 10f * D;
+    public const float SmallRounding  = 6f * D;
 
     private static bool _sizesScaled;
 
@@ -141,11 +143,11 @@ public static class Theme
 
         style.WindowRounding    = WindowRounding;
         style.ChildRounding     = SmallRounding;
-        style.FrameRounding     = 8f;
-        style.PopupRounding     = 6f;
-        style.ScrollbarRounding = 4f;
-        style.GrabRounding      = 4f;
-        style.TabRounding       = 8f;
+        style.FrameRounding     = 4f;
+        style.PopupRounding     = 4f;
+        style.ScrollbarRounding = 3f;
+        style.GrabRounding      = 3f;
+        style.TabRounding       = 5f;
 
         style.WindowBorderSize  = 0f;
         style.ChildBorderSize   = 0f;

@@ -44,6 +44,21 @@ internal static unsafe class GlBackend
     private delegate void D_GetShaderiv(uint shader, uint pname, out int param);
     private delegate void D_GetProgramiv(uint program, uint pname, out int param);
     private delegate void D_GetInfoLog(uint obj, int bufSize, out int length, byte* infoLog);
+    private delegate void D_Finish();
+    private delegate void D_Viewport(int x, int y, int width, int height);
+    private delegate void D_BlitFramebuffer(int srcX0, int srcY0, int srcX1, int srcY1,
+                                            int dstX0, int dstY0, int dstX1, int dstY1, uint mask, uint filter);
+    private delegate void D_GenFramebuffers(int n, out uint framebuffers);
+    private delegate void D_DeleteFramebuffers(int n, ref uint framebuffers);
+    private delegate void D_BindFramebuffer(uint target, uint framebuffer);
+    private delegate void D_FramebufferTexture2D(uint target, uint attachment, uint texTarget, uint texture, int level);
+    private delegate uint D_CheckFramebufferStatus(uint target);
+    private delegate void D_Clear(uint mask);
+    private delegate void D_ClearColor(float red, float green, float blue, float alpha);
+    private delegate void D_GetIntegerv(uint pname, out int data);
+    private delegate uint D_GetError();
+    private delegate void D_DeleteVertexArrays(int n, ref uint arrays);
+    [return: MarshalAs(UnmanagedType.U1)] private delegate bool D_IsProgram(uint program);
 
     private static D_CreateProgram          glCreateProgram          = null!;
     private static D_CreateShader           glCreateShader           = null!;
@@ -82,6 +97,20 @@ internal static unsafe class GlBackend
     private static D_GetProgramiv           glGetProgramiv           = null!;
     private static D_GetInfoLog             glGetShaderInfoLog       = null!;
     private static D_GetInfoLog             glGetProgramInfoLog      = null!;
+    private static D_Finish                 glFinish                 = null!;
+    private static D_Viewport               glViewport               = null!;
+    private static D_BlitFramebuffer        glBlitFramebuffer        = null!;
+    private static D_GenFramebuffers        glGenFramebuffers        = null!;
+    private static D_DeleteFramebuffers     glDeleteFramebuffers     = null!;
+    private static D_BindFramebuffer        glBindFramebuffer        = null!;
+    private static D_FramebufferTexture2D   glFramebufferTexture2D   = null!;
+    private static D_CheckFramebufferStatus glCheckFramebufferStatus = null!;
+    private static D_Clear                  glClear                  = null!;
+    private static D_ClearColor             glClearColor             = null!;
+    private static D_GetIntegerv            glGetIntegerv            = null!;
+    private static D_GetError               glGetError               = null!;
+    private static D_DeleteVertexArrays     glDeleteVertexArrays     = null!;
+    private static D_IsProgram?             glIsProgram;
 
     private static bool _loaded;
 
@@ -128,6 +157,24 @@ internal static unsafe class GlBackend
         glGetProgramiv            = GlLoader.Load<D_GetProgramiv>("glGetProgramiv");
         glGetShaderInfoLog        = GlLoader.Load<D_GetInfoLog>("glGetShaderInfoLog");
         glGetProgramInfoLog       = GlLoader.Load<D_GetInfoLog>("glGetProgramInfoLog");
+
+        // The stream window: the game's frame is blitted into a shared texture (blit + FBO), then
+        // drawn by the overlay window's own context, so the game's backbuffer never carries us.
+        glFinish                  = GlLoader.Load<D_Finish>("glFinish");
+        glViewport                = GlLoader.Load<D_Viewport>("glViewport");
+        glBlitFramebuffer         = GlLoader.Load<D_BlitFramebuffer>("glBlitFramebuffer");
+        glGenFramebuffers         = GlLoader.Load<D_GenFramebuffers>("glGenFramebuffers");
+        glDeleteFramebuffers      = GlLoader.Load<D_DeleteFramebuffers>("glDeleteFramebuffers");
+        glBindFramebuffer         = GlLoader.Load<D_BindFramebuffer>("glBindFramebuffer");
+        glFramebufferTexture2D    = GlLoader.Load<D_FramebufferTexture2D>("glFramebufferTexture2D");
+        glCheckFramebufferStatus  = GlLoader.Load<D_CheckFramebufferStatus>("glCheckFramebufferStatus");
+        glClear                   = GlLoader.Load<D_Clear>("glClear");
+        glClearColor              = GlLoader.Load<D_ClearColor>("glClearColor");
+        glGetIntegerv             = GlLoader.Load<D_GetIntegerv>("glGetIntegerv");
+        glGetError                = GlLoader.Load<D_GetError>("glGetError");
+        glDeleteVertexArrays      = GlLoader.Load<D_DeleteVertexArrays>("glDeleteVertexArrays");
+        // GL 2.0 / GLES 2.0; optional — used only to verify that contexts really share objects.
+        glIsProgram               = GlLoader.TryLoad<D_IsProgram>("glIsProgram");
     }
 
     public static uint CreateShader(string vertSrc, string fragSrc)
@@ -208,6 +255,61 @@ internal static unsafe class GlBackend
             0x1908 /*GL_RGBA*/,
             0x1401 /*GL_UNSIGNED_BYTE*/,
             pixels);
+
+    // --- the stream window's needs: read the game's frame back on the GPU, draw it elsewhere ------
+
+    /// <summary>An empty RGBA8 texture: the target of the blit that copies the game's frame.</summary>
+    public static void TexImage2DEmpty(int w, int h)
+        => glTexImage2D(
+            0x0DE1 /*GL_TEXTURE_2D*/, 0,
+            0x8058 /*GL_RGBA8*/,
+            w, h, 0,
+            0x1908 /*GL_RGBA*/,
+            0x1401 /*GL_UNSIGNED_BYTE*/,
+            0);
+
+    public static void Finish() => glFinish();
+    public static void Viewport(int x, int y, int w, int h) => glViewport(x, y, w, h);
+
+    public static void BlitFramebuffer(int sx0, int sy0, int sx1, int sy1,
+                                       int dx0, int dy0, int dx1, int dy1, uint mask, uint filter)
+        => glBlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter);
+
+    public static uint GenFramebuffer() { glGenFramebuffers(1, out var f); return f; }
+    public static void DeleteFramebuffer(uint fb) => glDeleteFramebuffers(1, ref fb);
+    public static void BindFramebuffer(uint target, uint fb) => glBindFramebuffer(target, fb);
+
+    public static void FramebufferTexture2D(uint target, uint attachment, uint texTarget, uint tex, int level)
+        => glFramebufferTexture2D(target, attachment, texTarget, tex, level);
+
+    public static uint CheckFramebufferStatus(uint target) => glCheckFramebufferStatus(target);
+
+    public static void Clear(uint mask) => glClear(mask);
+    public static void ClearColor(float r, float g, float b, float a) => glClearColor(r, g, b, a);
+
+    /// <summary>One integer of GL state (0 when the context doesn't know the name).</summary>
+    public static int GetInt(uint pname)
+    {
+        var v = 0;
+        glGetIntegerv(pname, out v);
+        return v;
+    }
+
+    public static uint GetError() => glGetError();
+
+    /// <summary>Clears every pending error; true if there was any.</summary>
+    public static bool DrainErrors()
+    {
+        var any = false;
+        for (var i = 0; i < 16 && glGetError() != 0; i++)
+            any = true;
+        return any;
+    }
+
+    /// <summary>Whether <paramref name="program"/> exists in this context (null when unsupported).</summary>
+    public static bool? IsProgram(uint program) => glIsProgram is null ? null : glIsProgram(program);
+
+    public static void DeleteVertexArray(uint v) => glDeleteVertexArrays(1, ref v);
 
     public static bool HasBaseVertex => glDrawElementsBaseVertex is not null;
 

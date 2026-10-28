@@ -41,6 +41,10 @@ coverage*.json
 coverage*.xml
 coverage*.info
 
+# ---- Локальные дампы и декомпиляции ----
+# Сторонние деки и дампы (kaban/cerberus и прочее): огромные, не часть проекта.
+/1/
+
 # ---- Прочее ----
 *.pdb
 *.tmp
@@ -49,3 +53,6 @@ coverage*.info
 *.log
 .DS_Store
 Thumbs.db
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

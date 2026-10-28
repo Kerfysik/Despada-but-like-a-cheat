@@ -28,6 +28,9 @@ internal static unsafe class Sdl3
     private static delegate* unmanaged[Cdecl]<nint, int*, int*, byte> _getWindowSize;
     private static delegate* unmanaged[Cdecl]<nint, int*, int*, byte> _getWindowSizeInPixels;
     private static delegate* unmanaged[Cdecl]<nint, byte> _startTextInput, _stopTextInput, _textInputActive;
+    private static delegate* unmanaged[Cdecl]<nint, uint>             _getWindowProperties;
+    private static delegate* unmanaged[Cdecl]<uint, nint, nint, nint> _getPointerProperty;
+    private static nint _win32HwndProp;   // "SDL.window.win32.hwnd" in UTF-8, allocated once
 
     [DllImport("libc", EntryPoint = "dlopen")]   private static extern nint DlOpenLinux(string file, int mode);
     [DllImport("libSystem", EntryPoint = "dlopen")] private static extern nint DlOpenMac(string file, int mode);
@@ -84,6 +87,12 @@ internal static unsafe class Sdl3
             return false;
         }
         Get(h, "SDL_RunOnMainThread", out var g);   // 3.2+: without it the filter is set from the calling thread
+        // Optional: the OS window handle of the SDL window, for SetWindowDisplayAffinity.
+        if (Get(h, "SDL_GetWindowProperties", out var pp) && Get(h, "SDL_GetPointerProperty", out var qp))
+        {
+            _getWindowProperties = (delegate* unmanaged[Cdecl]<nint, uint>)pp;
+            _getPointerProperty   = (delegate* unmanaged[Cdecl]<uint, nint, nint, nint>)qp;
+        }
         if (Get(h, "SDL_StartTextInput", out var t1) && Get(h, "SDL_StopTextInput", out var t2) && Get(h, "SDL_TextInputActive", out var t3))
         {
             _startTextInput  = (delegate* unmanaged[Cdecl]<nint, byte>)t1;
@@ -119,6 +128,18 @@ internal static unsafe class Sdl3
         => _runOnMainThread is not null && _runOnMainThread(callback, userdata, 0) != 0;
 
     public static uint WindowId(nint window) => window == 0 ? 0 : _getWindowId(window);
+
+    /// <summary>
+    /// HWND of the SDL window (its "SDL.window.win32.hwnd" property): 0 on other platforms, on an
+    /// engine windowed through GLFW, or when the properties API isn't there (SDL 3.0).
+    /// </summary>
+    public static nint Win32Hwnd(nint window)
+    {
+        if (window == 0 || _getWindowProperties is null || _getPointerProperty is null) return 0;
+        if (_win32HwndProp == 0) _win32HwndProp = Marshal.StringToCoTaskMemUTF8("SDL.window.win32.hwnd");
+        var props = _getWindowProperties(window);
+        return props == 0 ? 0 : _getPointerProperty(props, _win32HwndProp, 0);
+    }
 
     /// <summary>Text input (the stream of SDL_EVENT_TEXT_INPUT) for the window: SDL has it, read it, turn it on, off.</summary>
     public static bool HasTextInput => _textInputActive is not null;

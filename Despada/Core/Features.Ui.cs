@@ -15,6 +15,21 @@ internal static partial class Features
 {
     public static IEnumerable<Feature> WithTabs => _all.Where(f => f.Tab is not null);
 
+    /// <summary>Some on-feature draws outside the menu: the frame has to render for it (and be hideable for a capture).</summary>
+    public static bool HudActive => _all.Any(f => f.State == FeatureState.On && f.HasHud);
+
+    /// <summary>Every on-feature's HUD drawing for the frame, each on its own: one throwing only takes itself down.</summary>
+    public static void DrawHud()
+    {
+        foreach (var f in _all)
+        {
+            if (f.State != FeatureState.On || !f.HasHud) continue;
+            ImGuiNET.ImGui.PushID(f.Id);
+            Guarded(f, "hud", f.DrawHud);
+            ImGuiNET.ImGui.PopID();
+        }
+    }
+
     public static void DrawTabRow(Feature f)
     {
         ImGuiNET.ImGui.PushID(f.Id);

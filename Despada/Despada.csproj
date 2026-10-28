@@ -47,6 +47,7 @@
         <EmbeddedResource Include="Native\libcimgui.so" />
         <EmbeddedResource Include="Assets\icon.png" />
         <EmbeddedResource Include="Assets\JetBrainsMonoNerdFontMono-Regular.ttf" />
+        <EmbeddedResource Include="Assets\BoxfontRound.ttf" />
         <EmbeddedResource Include="Assets\JetBrainsMono-ExtraBold-Caps.ttf" />
         <EmbeddedResource Include="$(PkgImGui_NET)\lib\net8.0\ImGui.NET.dll" LogicalName="Despada.Deps.ImGui.NET.dll" />
     </ItemGroup>

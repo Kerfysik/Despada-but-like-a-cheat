@@ -5,6 +5,7 @@
 using System.Collections.Concurrent;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Despada.Config;
 using Despada.Core;
 using Despada.ImGui.Hook;
@@ -47,6 +48,22 @@ public static class ImGuiRenderer
 
     public static void ShowToast(string title, string body, float seconds = 3f)
         => _pendingToasts.Enqueue(new Toast(title, body, seconds));
+
+    private static long _drawingSuppressedUntil;
+
+    /// <summary>
+    /// True while a capture may be taking the frame: nothing of ours is drawn — no menu, no toasts,
+    /// no HUD feature (the anti-screengrab's whole job). The frame itself still runs, so ticks and
+    /// input stay in step and the overlay comes back exactly as it was once the window is lifted.
+    /// </summary>
+    public static bool DrawingSuppressed => Environment.TickCount64 < Volatile.Read(ref _drawingSuppressedUntil);
+
+    /// <summary>Drops all of our drawing for <paramref name="milliseconds"/> (a screenshot was queued).</summary>
+    public static void SuppressDrawing(int milliseconds)
+        => Volatile.Write(ref _drawingSuppressedUntil, Environment.TickCount64 + milliseconds);
+
+    /// <summary>Lifts <see cref="SuppressDrawing"/> now (it also expires on its own).</summary>
+    public static void ResumeDrawing() => Volatile.Write(ref _drawingSuppressedUntil, 0);
 
     public static void RenderFrame()
     {
@@ -106,10 +123,14 @@ public static class ImGuiRenderer
         }
 
         bool hasToasts = !_pendingToasts.IsEmpty || _activeToasts.Count > 0;
-        bool needRender = visible || hasToasts;
+        // Anti-screengrab: while a capture may be in flight nothing of ours is drawn, so with the
+        // menu closed there is nothing left to render — the clock still runs below for the next frame.
+        bool needRender = !DrawingSuppressed && (visible || hasToasts || Features.HudActive);
 
         if (!needRender)
         {
+            // Nothing to draw: the stream window goes away too, so the screen shows only the game.
+            OverlayWindow.BeginFrame(false, _screenW, _screenH);
             ImGuiInputHook.FlushEvents(false);
             // Keep the frame clock running while nothing is drawn, so the first frame after opening
             // gets a normal DeltaTime instead of the 0.1 s clamp (animations would jump a step).
@@ -165,10 +186,21 @@ public static class ImGuiRenderer
             GlStateGuard.Save();
             try
             {
+                // The stream window copies the game's finished frame first, so the background image
+                // the UI references below is this frame's, not the last one's.
+                OverlayWindow.BeginFrame(true, _screenW, _screenH);
+
                 // Inside the guard: a rebuild re-uploads the atlas texture and touches GL state.
                 MaybeRebuildFont(io);
 
                 ImGuiNET.ImGui.NewFrame();
+
+                // In stream mode the game window holds the game only: put the frame we just copied
+                // under everything else, flipped (GL rows start at the bottom).
+                if (OverlayWindow.GameTexture != 0)
+                    ImGuiNET.ImGui.GetBackgroundDrawList().AddImage(
+                        OverlayWindow.GameTexture, Vector2.Zero, io.DisplaySize,
+                        new Vector2(0f, 1f), new Vector2(1f, 0f));
 
                 ImGuiInputHook.SnapshotWantCapture(visible);
 
@@ -181,12 +213,25 @@ public static class ImGuiRenderer
                 if (visible)
                     DrawUI();
 
+                // Outside the menu, and only in the frames that reach here (a capture suppresses them all).
+                Features.DrawHud();
+
                 ImGuiNET.ImGui.Render();
                 // Blurs the area under the main window for this frame's backdrop (no-op if not requested).
                 GlassBlur.Run(_screenW, _screenH);
                 var drawData = ImGuiNET.ImGui.GetDrawData();
                 SnapGlyphsToPixels(drawData);
-                RenderDrawData(drawData);
+                if (OverlayWindow.Ready)
+                {
+                    // Draw in the stream window; if that fails mid-frame, the game's framebuffer takes
+                    // over (Fail has already dropped our drawing for any capture in flight).
+                    if (!OverlayWindow.Render(drawData, _screenW, _screenH))
+                        RenderDrawData(drawData, _vao);
+                }
+                else
+                {
+                    RenderDrawData(drawData, _vao);
+                }
             }
             finally
             {
@@ -381,7 +426,17 @@ public static class ImGuiRenderer
 
     private static GCHandle _fontDataHandle;
     private static GCHandle _glyphRangesHandle;
-    
+
+    /// <summary>
+    /// The game's own font (Boxfont Round, embedded), for the ESP/HUD text: Cerberus drew its
+    /// labels with the same face, so the overlay reads like the game's UI. A raw pointer, not an
+    /// ImFontPtr field, for the same reason as <see cref="WordmarkFont"/>.
+    /// </summary>
+    public static nint EspFont { get; private set; }
+
+    private static GCHandle _espDataHandle;
+    private static GCHandle _espRangesHandle;
+
     private static float _atlasBuiltScale = -1f;
 
     // Body and wordmark pixel sizes: the atlas is rasterised at exactly these (physical) sizes.
@@ -396,8 +451,10 @@ public static class ImGuiRenderer
     private static void BuildFontAtlas(ImGuiIOPtr io, float scale)
     {
         WordmarkFont = 0;
+        EspFont       = 0;
         io.Fonts.Clear();
         LoadFont(io, scale);
+        LoadEspFont(io);
 
         io.FontGlobalScale = 1f / UiScale.K;
 
@@ -414,6 +471,8 @@ public static class ImGuiRenderer
         if (_glyphRangesHandle.IsAllocated) _glyphRangesHandle.Free();
         if (_capsDataHandle.IsAllocated)    _capsDataHandle.Free();
         if (_capsRangesHandle.IsAllocated)  _capsRangesHandle.Free();
+        if (_espDataHandle.IsAllocated)     _espDataHandle.Free();
+        if (_espRangesHandle.IsAllocated)   _espRangesHandle.Free();
 
         _atlasBuiltScale = scale;
         MarseyLogger.Info($"[ImGuiRenderer] Font atlas: {fw}x{fh} (scale={scale:F2}, K={UiScale.K:F2})");
@@ -515,6 +574,44 @@ public static class ImGuiRenderer
             CapsPx(scale), cfg, _capsRangesHandle.AddrOfPinnedObject());
         ImGuiNative.ImFontConfig_destroy(cfg.NativePtr);
         WordmarkFont = (nint)font.NativePtr;
+    }
+
+    /// <summary>
+    /// The game's own face (Boxfont Round, embedded): the ESP/HUD labels are drawn with it at their
+    /// own sizes, so they read like the game's UI instead of like a separate overlay.
+    /// </summary>
+    private static unsafe void LoadEspFont(ImGuiIOPtr io)
+    {
+        EspFont = 0;
+        const string resourceName = "Despada.Assets.BoxfontRound.ttf";
+        using var stream = EmbeddedAssemblies.Self.GetManifestResourceStream(resourceName);
+        if (stream is null)
+        {
+            MarseyLogger.Warn($"[ImGuiRenderer] Font not found: '{resourceName}'");
+            return;
+        }
+
+        var data = new byte[stream.Length];
+        stream.ReadExactly(data);
+        if (_espDataHandle.IsAllocated)   _espDataHandle.Free();
+        if (_espRangesHandle.IsAllocated) _espRangesHandle.Free();
+
+        _espDataHandle    = GCHandle.Alloc(data, GCHandleType.Pinned);
+        _espRangesHandle  = GCHandle.Alloc(BuildGlyphRanges(), GCHandleType.Pinned);
+
+        var cfg = new ImFontConfigPtr(ImGuiNative.ImFontConfig_ImFontConfig());
+        cfg.FontDataOwnedByAtlas = false;
+        cfg.OversampleH          = 1;
+        cfg.OversampleV          = 1;
+        cfg.PixelSnapH           = true;
+
+        // Rasterised large and drawn down: the HUD uses it at a few sizes and stays crisp.
+        var font = io.Fonts.AddFontFromMemoryTTF(_espDataHandle.AddrOfPinnedObject(), data.Length,
+            32f, cfg, _espRangesHandle.AddrOfPinnedObject());
+        ImGuiNative.ImFontConfig_destroy(cfg.NativePtr);
+
+        EspFont = (nint)font.NativePtr;
+        MarseyLogger.Info($"[ImGuiRenderer] Font: {resourceName} @ 32px (ESP/HUD)");
     }
 
     private static ushort[] BuildGlyphRanges() =>
@@ -662,7 +759,13 @@ public static class ImGuiRenderer
 
     private static float RoundHalfUp(float v) => MathF.Floor(MathF.Round(v * 256f) / 256f + 0.5f);
 
-    private static unsafe void RenderDrawData(ImDrawDataPtr drawData)
+    /// <summary>Draws one ImGui frame into the current context with <paramref name="vao"/> (the stream window's own).</summary>
+    internal static void RenderDrawDataInto(ImDrawDataPtr drawData, uint vao) => RenderDrawData(drawData, vao);
+
+    /// <summary>The ImGui shader; the stream window's context must see it (shared objects).</summary>
+    internal static uint ShaderId => _shader;
+
+    private static unsafe void RenderDrawData(ImDrawDataPtr drawData, uint vao)
     {
         if (drawData.CmdListsCount == 0) return;
 
@@ -702,7 +805,7 @@ public static class ImGuiRenderer
         proj[15] = 1f;
         GlBackend.UniformMatrix4fv(_uniformProjMtx, proj);
 
-        GlBackend.BindVertexArray(_vao);
+        GlBackend.BindVertexArray(vao);
         GlBackend.BindBuffer(0x8892, _vbo);
         GlBackend.BindBuffer(0x8893, _ebo);
         GlBackend.EnableVertexAttribArray(_attribPos);
@@ -770,6 +873,7 @@ public static class ImGuiRenderer
 
     public static void Shutdown()
     {
+        OverlayWindow.Shutdown();
         if (!_initialized) return;
         GlassBlur.Release();
         if (_fontDataHandle.IsAllocated) _fontDataHandle.Free();

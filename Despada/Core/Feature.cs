@@ -66,6 +66,15 @@ internal abstract class Feature
     /// <summary>The tab's content while the feature is on (its settings live here too).</summary>
     public virtual void DrawTab() { }
 
+    /// <summary>
+    /// True when <see cref="DrawHud"/> draws something: the overlay frame then renders even with the
+    /// menu closed, which is also the state the anti-screengrab has to be able to hide.
+    /// </summary>
+    public virtual bool HasHud => false;
+
+    /// <summary>The feature's drawing outside the menu, once per rendered frame (world ESP, labels).</summary>
+    public virtual void DrawHud() { }
+
     protected T Setting<T>(string key, T fallback) => Features.GetSetting(Id, key, fallback);
 
     protected void SetSetting<T>(string key, T value) => Features.SetSetting(Id, key, value);
